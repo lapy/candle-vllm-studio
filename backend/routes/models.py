@@ -701,6 +701,9 @@ async def start_model(
         "env": stored_config.get("env", {}),
         "build_profile": stored_config.get("build_profile", "release"),
         "binary_path": stored_config.get("binary_path"),
+        "health_endpoints": stored_config.get("health_endpoints", ["/v1/models"]),
+        "health_interval": stored_config.get("health_interval", 30),
+        "model_name": stored_config.get("model_name") or model.name or model.base_model_name,
     }
 
     try:

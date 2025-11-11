@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 import psutil
@@ -145,8 +146,14 @@ class SmartAutoConfig:
         adjusted_slider = _apply_profile_bias(slider_value, usage_profile)
 
         metadata = get_model_metadata(model)
+        model_name = (
+            getattr(model, "name", "") or
+            getattr(model, "huggingface_id", "") or
+            Path(getattr(model, "file_path", "") or "").stem or
+            "unknown"
+        )
         model_profile = ModelProfile(
-            name=getattr(model, "name", "unknown"),
+            name=model_name,
             size_gb=(getattr(model, "file_size", 0) or 0) / (1024 ** 3),
             quantization=getattr(model, "quantization", None),
             file_path=(getattr(model, "file_path", "") or "").strip(),
@@ -185,7 +192,10 @@ class SmartAutoConfig:
 
         prefill_limits = PARAMETER_LIMITS["prefill_chunk_size"]
         prefill_value = interpolate_three(usage_profile.prefill_chunk_size.as_dict(), adjusted_slider)
-        prefill_chunk_size = int(round(map_range(prefill_value, prefill_limits["min"], prefill_limits["max"])))
+        prefill_candidate = map_range(prefill_value, prefill_limits["min"], prefill_limits["max"])
+        prefill_chunk_size = int(max(prefill_limits["min"], round(prefill_candidate / 1024) * 1024))
+        if prefill_chunk_size < 1024:
+            prefill_chunk_size = 1024
 
         max_tokens = self._determine_max_tokens(
             metadata,
@@ -264,6 +274,7 @@ class SmartAutoConfig:
             "max_num_seqs": None if concurrency <= 1 else concurrency,
             "block_size": block_size,
             "prefill_chunk_size": prefill_chunk_size,
+            "model_name": model_profile.name,
             "temperature": sampling["temperature"],
             "top_p": sampling["top_p"],
             "min_p": sampling["min_p"],
@@ -276,6 +287,8 @@ class SmartAutoConfig:
             "record_conversation": False,
             "log": False,
             "verbose": False,
+            "health_endpoints": ["/v1/models"],
+            "health_interval": 30,
             "usage_mode": usage_mode,
             "speed_quality": slider_value,
             "use_case": use_case or usage_profile.key,
@@ -304,6 +317,10 @@ class SmartAutoConfig:
                         "quant_key": precision.quant_key,
                         "model_vram_gb": round(precision.model_vram_gb, 2),
                         "fp8_kv_cache": fp8_enabled,
+                    },
+                    "health": {
+                        "endpoints": ["/v1/models"],
+                        "interval": 30,
                     },
                     "topology_plan": topology_plan,
                     "decisions": decision_log.to_dict(),
@@ -587,18 +604,17 @@ class SmartAutoConfig:
             quant = _normalise_quant_key(model_profile.quantization or bucket)
             if quant not in QUANTIZATION_FACTORS:
                 quant = _prefer_quant(bucket)
-            dtype = quant
             decisions.record(
                 "dtype",
-                dtype,
-                "Model ships as GGUF; using stored dtype",
+                None,
+                "Model ships as GGUF; using on-disk quantised dtype",
                 context,
             )
             return PrecisionChoice(
-                dtype=dtype,
+                dtype=None,
                 isq=None,
-                quant_key=dtype,
-                model_vram_gb=model_profile.size_gb * QUANTIZATION_FACTORS.get(dtype, 1.0),
+                quant_key=quant,
+                model_vram_gb=model_profile.size_gb * QUANTIZATION_FACTORS.get(quant, 1.0),
                 fp8_kv_cache=_should_enable_fp8(hardware, slider),
             )
 

@@ -85,11 +85,15 @@ async def test_generate_config_gpu_defaults():
         use_case="chat",
     )
 
-    assert config["dtype"] is not None
+    assert config.get("dtype") in (None, "f16", "bf16", "f32")
     assert config["kvcache_mem_gpu"] > 0
     assert config["max_gen_tokens"] >= 512
     assert config["usage_mode"] == "multi_user"
     assert config["max_num_seqs"] is None or config["max_num_seqs"] >= 1
+    assert config["prefill_chunk_size"] % 1024 == 0
+    assert config["health_endpoints"] == ["/v1/models"]
+    assert config["health_interval"] == 30
+    assert config["model_name"] == model.name
     assert "topology_plan" in config
 
 

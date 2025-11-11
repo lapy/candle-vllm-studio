@@ -316,6 +316,9 @@ class CandleRuntimeManager:
             cmd.extend(["--max-num-seqs", str(int(max_num_seqs))])
         if block_size:
             cmd.extend(["--block-size", str(int(block_size))])
+        model_name = config.get("model_name")
+        if model_name:
+            cmd.extend(["--m", str(model_name)])
         if dtype:
             cmd.extend(["--dtype", str(dtype)])
         if isq:
@@ -452,7 +455,7 @@ class CandleRuntimeManager:
         health_endpoints: Optional[list] = None
     ) -> None:
         """Poll candle-vllm for readiness."""
-        endpoints = health_endpoints or ["/health", "/v1/models"]
+        endpoints = health_endpoints or ["/v1/models"]
         start = (self._loop.time() if hasattr(self._loop, "time") else asyncio.get_event_loop().time())
         async with httpx.AsyncClient() as client:
             while True:
