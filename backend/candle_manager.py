@@ -790,40 +790,47 @@ class CandleProxyServer:
         headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
         params = request.query_params.multi_items()
 
-        async with self._client.stream(
+        stream_cm = self._client.stream(
             request.method,
             upstream_url,
             params=params or None,
             headers=headers,
             content=body or None,
-        ) as upstream:
-            response_headers = {
-                k: v
-                for k, v in upstream.headers.items()
-                if k.lower() not in {"content-length", "transfer-encoding", "connection"}
-            }
-            content_type = upstream.headers.get("content-type", "")
+        )
 
-            if content_type.startswith("text/event-stream"):
-                async def iterator():
+        upstream = await stream_cm.__aenter__()
+        response_headers = {
+            k: v
+            for k, v in upstream.headers.items()
+            if k.lower() not in {"content-length", "transfer-encoding", "connection"}
+        }
+        content_type = upstream.headers.get("content-type", "")
+
+        if content_type.startswith("text/event-stream"):
+
+            async def iterator():
+                try:
                     async for chunk in upstream.aiter_bytes():
                         yield chunk
+                finally:
+                    await stream_cm.__aexit__(None, None, None)
 
-                return StreamingResponse(
-                    iterator(),
-                    status_code=upstream.status_code,
-                    headers=response_headers,
-                    media_type=content_type or None,
-                )
-
-            content = await upstream.aread()
-            response_headers["content-length"] = str(len(content))
-            return Response(
-                content=content,
+            return StreamingResponse(
+                iterator(),
                 status_code=upstream.status_code,
                 headers=response_headers,
                 media_type=content_type or None,
             )
+
+        content = await upstream.aread()
+        await stream_cm.__aexit__(None, None, None)
+        response_headers["content-length"] = str(len(content))
+        return Response(
+            content=content,
+            status_code=upstream.status_code,
+            headers=response_headers,
+            media_type=content_type or None,
+        )
 
     def _lookup_runtime_locked(self, identifier: Optional[str]) -> Optional[Dict[str, Any]]:
         if not self._runtimes:
