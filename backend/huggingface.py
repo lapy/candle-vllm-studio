@@ -118,33 +118,47 @@ async def _rate_limit():
     _last_request_time = time.time()
 
 
-async def search_models(query: str, limit: int = 20) -> List[Dict]:
-    """Search HuggingFace for GGUF models. Works with or without a token (unauthenticated if none)."""
+async def search_models(query: str, limit: int = 20, model_type: str = "gguf") -> List[Dict]:
+    """Search HuggingFace for models. Works with or without a token (unauthenticated if none).
+    
+    Args:
+        query: Search query string
+        limit: Maximum number of results to return
+        model_type: Filter by model type - "gguf", "safetensors", or "all" (default: "gguf")
+    """
     try:
         # Check cache first
-        cache_key = f"{query.lower()}_{limit}"
+        cache_key = f"{query.lower()}_{limit}_{model_type}"
         current_time = time.time()
         
         if cache_key in _search_cache:
             cached_data, cache_time = _search_cache[cache_key]
             if current_time - cache_time < _cache_timeout:
-                logger.info(f"Returning cached results for '{query}'")
+                logger.info(f"Returning cached results for '{query}' (type: {model_type})")
                 return cached_data[:limit]  # Return only requested limit
         
-        logger.info(f"Searching for models with query: '{query}', limit: {limit}")
+        logger.info(f"Searching for models with query: '{query}', limit: {limit}, type: {model_type}")
         # Always attempt API search; authentication will be used automatically if a token is set
-        return await _search_with_api(query, limit)
+        return await _search_with_api(query, limit, model_type)
         
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise Exception(f"Failed to search models: {e}")
 
 
-async def _search_with_api(query: str, limit: int) -> List[Dict]:
+async def _search_with_api(query: str, limit: int, model_type: str = "gguf") -> List[Dict]:
     """Search using HuggingFace Hub API (authenticated if token is configured)."""
     try:
         # Apply rate limiting
         await _rate_limit()
+        
+        # Determine filter based on model_type
+        hf_filter = None
+        if model_type == "gguf":
+            hf_filter = "gguf"
+        elif model_type == "safetensors":
+            hf_filter = "safetensors"
+        # model_type == "all" means no filter
         
         # Use real HuggingFace API search with expand parameter for rich metadata
         models_generator = list_models(
@@ -152,22 +166,22 @@ async def _search_with_api(query: str, limit: int) -> List[Dict]:
             limit=min(limit * 2, 50),  # Get more models to filter from
             sort="downloads",
             direction=-1,
-            filter="gguf",  # Filter for models that have GGUF files
+            filter=hf_filter,  # Filter based on model type
             expand=["author", "cardData", "siblings"]  # Ensure author is present, plus metadata
         )
         
         # Convert generator to list
         models = list(models_generator)
-        logger.info(f"Found {len(models)} models from HuggingFace API with expanded metadata")
+        logger.info(f"Found {len(models)} models from HuggingFace API with expanded metadata (type: {model_type})")
         
         # Process models in parallel for better performance
-        results = await _process_models_parallel(models, limit)
+        results = await _process_models_parallel(models, limit, model_type)
         
         # Cache the results
-        cache_key = f"{query.lower()}_{limit}"
+        cache_key = f"{query.lower()}_{limit}_{model_type}"
         _search_cache[cache_key] = (results, time.time())
         
-        logger.info(f"Returning {len(results)} results from API")
+        logger.info(f"Returning {len(results)} results from API (type: {model_type})")
         return results
         
     except Exception as e:
@@ -176,13 +190,13 @@ async def _search_with_api(query: str, limit: int) -> List[Dict]:
         return []
 
 
-async def _process_models_parallel(models: List, limit: int, max_concurrent: int = 5) -> List[Dict]:
+async def _process_models_parallel(models: List, limit: int, model_type: str = "gguf", max_concurrent: int = 5) -> List[Dict]:
     """Process models in parallel with semaphore for concurrency control"""
     semaphore = asyncio.Semaphore(max_concurrent)
     
     async def process_model(model):
         async with semaphore:
-            return await _process_single_model(model)
+            return await _process_single_model(model, model_type)
     
     # Create tasks for all models
     tasks = [process_model(model) for model in models[:limit * 2]]
@@ -202,40 +216,59 @@ async def _process_models_parallel(models: List, limit: int, max_concurrent: int
     return valid_results[:limit]
 
 
-async def _process_single_model(model) -> Optional[Dict]:
-    """Process a single model and extract all metadata"""
+async def _process_single_model(model, model_type: str = "gguf") -> Optional[Dict]:
+    """Process a single model and extract all metadata
+    
+    Args:
+        model: Model info from HuggingFace API
+        model_type: Type of model to extract - "gguf", "safetensors", or "all"
+    """
     try:
-        logger.info(f"Processing model: {model.id}")
+        logger.info(f"Processing model: {model.id} (type: {model_type})")
         
-        # Extract GGUF files from siblings (no additional API call needed!)
-        gguf_files = []
-        if hasattr(model, 'siblings') and model.siblings:
-            gguf_files = [sibling.rfilename for sibling in model.siblings 
-                          if sibling.rfilename.endswith('.gguf')]
-        
-        logger.info(f"Model {model.id}: {len(gguf_files)} GGUF files found")
-        
-        if not gguf_files:
-            return None
-        
-        # Extract quantizations with file sizes from siblings
+        # Extract files based on model_type
+        target_files = []
         quantizations = {}
-        files_to_process = gguf_files  # Process ALL GGUF files
         
-        for file in files_to_process:
-            quantization = _extract_quantization(file)
-            if quantization == "unknown":
-                continue
+        if hasattr(model, 'siblings') and model.siblings:
+            if model_type == "gguf" or model_type == "all":
+                # Extract GGUF files
+                gguf_files = [sibling.rfilename for sibling in model.siblings 
+                              if sibling.rfilename.endswith('.gguf')]
+                target_files.extend(gguf_files)
+                
+                logger.info(f"Model {model.id}: {len(gguf_files)} GGUF files found")
+                
+                # Extract GGUF quantizations
+                for file in gguf_files:
+                    quantization = _extract_quantization(file)
+                    if quantization == "unknown":
+                        continue
+                    
+                    quantizations[quantization] = {
+                        "filename": file,
+                        "format": "gguf"
+                    }
+                    logger.info(f"Found GGUF quantization: {quantization} for file: {file}")
             
-            # NO SIZE ESTIMATION - only store filename for API call later
-            quantizations[quantization] = {
-                "filename": file
-                # NO size or size_mb fields - sizes will come from API call only
-            }
-            logger.info(f"Found quantization: {quantization} for file: {file} (no size estimation)")
+            if model_type == "safetensors" or model_type == "all":
+                # For safetensors, we already have the metadata extracted
+                # Just mark that this model has safetensors
+                pass
         
-        if not quantizations:
+        # For GGUF-only searches, skip if no GGUF quantizations found
+        if model_type == "gguf" and not quantizations:
             return None
+        
+        # For safetensors-only searches, skip if no safetensors
+        if model_type == "safetensors":
+            # Check if model has safetensors in siblings
+            has_safetensors = False
+            if hasattr(model, 'siblings') and model.siblings:
+                has_safetensors = any(s.rfilename.endswith('.safetensors') for s in model.siblings)
+            
+            if not has_safetensors:
+                return None
         
         # Extract rich metadata from model and cardData
         metadata = _extract_model_metadata(model)
@@ -247,11 +280,15 @@ async def _process_single_model(model) -> Optional[Dict]:
             "downloads": model.downloads,
             "likes": getattr(model, 'likes', 0),
             "tags": model.tags or [],
-            "quantizations": quantizations,
-            **metadata  # Include all extracted metadata
+            "model_type": model_type,
+            **metadata  # Include all extracted metadata (includes safetensors info)
         }
         
-        logger.info(f"Added model {model.id} to results")
+        # Only add quantizations if we found GGUF files
+        if quantizations:
+            result["quantizations"] = quantizations
+        
+        logger.info(f"Added model {model.id} to results (type: {model_type})")
         return result
         
     except Exception as e:

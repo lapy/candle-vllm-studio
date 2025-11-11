@@ -146,15 +146,30 @@ async def list_models(db: Session = Depends(get_db)):
 
 @router.post("/search")
 async def search_huggingface_models(request: dict):
-    """Search HuggingFace for GGUF models"""
+    """Search HuggingFace for models
+    
+    Request body:
+        - query: Search query string (required)
+        - limit: Maximum results to return (default: 20)
+        - model_type: Filter by model type - "gguf", "safetensors", or "all" (default: "gguf")
+    """
     try:
         query = request.get("query")
         limit = request.get("limit", 20)
+        model_type = request.get("model_type", "gguf")
         
         if not query:
             raise HTTPException(status_code=400, detail="query parameter is required")
         
-        results = await search_models(query, limit)
+        # Validate model_type
+        valid_types = ["gguf", "safetensors", "all"]
+        if model_type not in valid_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"model_type must be one of: {', '.join(valid_types)}"
+            )
+        
+        results = await search_models(query, limit, model_type)
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
