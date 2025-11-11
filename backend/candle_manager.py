@@ -408,8 +408,23 @@ class CandleRuntimeManager:
         if fp8_kvcache:
             cmd.append("--fp8-kvcache")
 
+        device_ids = config.get("device_ids")
         device = config.get("device_id")
-        if device is not None:
+        devices_arg = None
+
+        if device_ids:
+            if isinstance(device_ids, str):
+                devices_arg = device_ids.strip()
+            elif isinstance(device_ids, (list, tuple, set)):
+                formatted = ",".join(str(int(idx)) for idx in device_ids if idx is not None)
+                if formatted:
+                    devices_arg = formatted
+            else:
+                devices_arg = str(device_ids)
+
+        if devices_arg:
+            cmd.extend(["--d", devices_arg])
+        elif device is not None:
             cmd.extend(["--d", str(device)])
 
         for arg in additional_args:

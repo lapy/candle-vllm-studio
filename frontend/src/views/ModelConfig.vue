@@ -1125,6 +1125,42 @@ const normalizeRuntimeConfig = () => {
   if (typeof config.value.env !== 'object' || config.value.env === null) {
     config.value.env = {}
   }
+
+  const deviceIdsRaw = config.value.device_ids
+  if (Array.isArray(deviceIdsRaw)) {
+    const normalized = [
+      ...new Set(
+        deviceIdsRaw
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+          .map((value) => Math.round(value))
+      )
+    ]
+    config.value.device_ids = normalized.length ? normalized : null
+  } else if (typeof deviceIdsRaw === 'string') {
+    const parts = deviceIdsRaw
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part !== '')
+    const normalized = [
+      ...new Set(
+        parts
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+          .map((value) => Math.round(value))
+      )
+    ]
+    config.value.device_ids = normalized.length ? normalized : null
+  } else if (typeof deviceIdsRaw === 'number') {
+    if (Number.isFinite(deviceIdsRaw) && deviceIdsRaw >= 0) {
+      config.value.device_ids = [Math.round(deviceIdsRaw)]
+    } else {
+      config.value.device_ids = null
+    }
+  } else if (deviceIdsRaw === '' || deviceIdsRaw === undefined) {
+    config.value.device_ids = null
+  }
+
   const intFields = ['max_num_seqs', 'block_size', 'prefill_chunk_size', 'holding_time', 'top_k', 'device_id']
   intFields.forEach((field) => {
     const value = config.value[field]
@@ -1173,6 +1209,9 @@ const normalizeRuntimeConfig = () => {
     config.value.hf_token_path = config.value.hf_token_path ?? ''
   }
 
+  if (Array.isArray(config.value.device_ids) && config.value.device_ids.length) {
+    config.value.device_id = config.value.device_ids[0]
+  }
   if (config.value.device_id === null) {
     config.value.device_id = 0
   }
@@ -1989,6 +2028,7 @@ const getDefaultConfig = () => ({
   dtype: null,
   isq: null,
   max_gen_tokens: 4096,
+  device_ids: null,
   device_id: 0,
   features: [],
   extra_args: [],

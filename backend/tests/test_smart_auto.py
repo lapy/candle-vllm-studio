@@ -95,6 +95,7 @@ async def test_generate_config_gpu_defaults():
     assert config["health_interval"] == 30
     assert config["model_name"] == model.name
     assert "topology_plan" in config
+    assert config["device_ids"] == [0]
 
 
 @pytest.mark.asyncio
@@ -118,6 +119,7 @@ async def test_generate_config_cpu_only_allocates_cpu_cache():
     assert config["kvcache_mem_cpu"] is not None
     assert config["kvcache_mem_cpu"] > 0
     assert config["max_num_seqs"] is None
+    assert config["device_ids"] is None
 
 
 @pytest.mark.asyncio
@@ -160,4 +162,29 @@ async def test_generate_config_nvlink_restriction():
     assert nvlink_group["link_type"] == "nvlink"
     device_indices = {device["index"] for device in nvlink_group["devices"]}
     assert device_indices == {0, 1}
+    assert config["device_ids"] == [0, 1]
+    assert plan["global"].get("selected_devices") == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_gguf_allows_tensor_parallel():
+    model = DummyModel(
+        "gguf-model",
+        file_size=6 * 1024 ** 3,
+        quantization="Q4_K_M",
+        file_path="Qwen3-4B-Q4_K_M.gguf",
+    )
+    gpu_info = _nvlink_gpu_info()
+
+    config = await SmartAutoConfig().generate_config(
+        model=model,
+        gpu_info=gpu_info,
+        speed_quality=45,
+        use_case="chat",
+    )
+
+    plan = config["topology_plan"]
+    assert plan["groups"], "Expected topology plan groups for gguf model"
+    assert plan["global"]["tp_strategy"] == "tensor_parallel"
+    assert config["device_ids"] == [0, 1]
 

@@ -314,6 +314,47 @@ class SmartAutoConfig:
             "topology_plan": topology_plan,
         }
 
+        selected_devices: List[int] = []
+        selected_group_id: Optional[str] = None
+
+        groups = topology_plan.get("groups") or []
+        if groups:
+            best_group = max(
+                groups,
+                key=lambda g: (
+                    g.get("tp_degree", 1),
+                    g.get("kv_pool_mb", 0),
+                ),
+            )
+            selected_devices = [
+                int(device.get("index"))
+                for device in best_group.get("devices", [])
+                if device.get("index") is not None
+            ]
+            selected_group_id = best_group.get("id")
+
+        if selected_devices:
+            config["device_ids"] = selected_devices
+            config["device_id"] = selected_devices[0]
+            topology_plan["global"]["selected_devices"] = selected_devices
+            if selected_group_id:
+                topology_plan["global"]["selected_group_id"] = selected_group_id
+
+            decision_log.record(
+                "device_group",
+                selected_devices,
+                "Selected tensor-parallel device group"
+                if len(selected_devices) > 1
+                else "Selected primary GPU for inference",
+                {
+                    "tp_degree": len(selected_devices),
+                    "link_type": best_group.get("link_type"),
+                    "kv_pool_mb": best_group.get("kv_pool_mb"),
+                },
+            )
+        else:
+            config["device_ids"] = None
+
         if debug is not None:
             debug.update(
                 {
@@ -413,15 +454,6 @@ class SmartAutoConfig:
         restrict_to_nvlink: bool,
     ) -> Dict[str, Any]:
         devices = hardware_snapshot.devices
-        
-        # GGUF models cannot use multi-GPU tensor parallelism
-        if model_profile.is_gguf and len(devices) > 1:
-            logger.warning(
-                "GGUF models do not support multi-GPU inference. "
-                "Restricting to single GPU. Use safetensors with --isq for multi-GPU."
-            )
-            # Force single GPU selection
-            devices = devices[:1]
         
         if not devices:
             return {

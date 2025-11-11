@@ -423,6 +423,7 @@ async def download_model_task(huggingface_id: str, filename: str,
             "dtype": None,
             "isq": None,
             "max_gen_tokens": 4096,
+            "device_ids": None,
             "device_id": 0,
             "features": [],
             "extra_args": [],
@@ -594,6 +595,7 @@ async def download_safetensors_bundle_task(
             "dtype": "bf16",
             "isq": "q4k",  # Recommend q4k ISQ for safetensors
             "max_gen_tokens": 4096,
+            "device_ids": None,
             "device_id": 0,
             "features": [],
             "extra_args": [],
@@ -924,6 +926,7 @@ async def start_model(
         "dtype": stored_config.get("dtype"),
         "isq": stored_config.get("isq"),
         "max_gen_tokens": stored_config.get("max_gen_tokens"),
+        "device_ids": stored_config.get("device_ids"),
         "device_id": stored_config.get("device_id"),
         "build_name": build_name,
         "features": stored_config.get("features", []),
@@ -935,6 +938,25 @@ async def start_model(
         "health_interval": stored_config.get("health_interval", 30),
         "model_name": stored_config.get("model_name") or model.name or model.base_model_name,
     }
+
+    raw_device_ids = runtime_config.get("device_ids")
+    if raw_device_ids:
+        first_device = None
+        if isinstance(raw_device_ids, (list, tuple)):
+            if raw_device_ids:
+                first_device = raw_device_ids[0]
+        elif isinstance(raw_device_ids, str):
+            parts = [part.strip() for part in raw_device_ids.split(",") if part.strip()]
+            if parts:
+                first_device = parts[0]
+        else:
+            first_device = raw_device_ids
+
+        if first_device is not None:
+            try:
+                runtime_config["device_id"] = int(first_device)
+            except (TypeError, ValueError):
+                pass
 
     try:
         await websocket_manager.send_model_status_update(
