@@ -130,11 +130,11 @@
                 <span class="metric-label">Memory Usage</span>
                 <div class="metric-bar">
                   <ProgressBar 
-                    :value="(gpu.memory.used / gpu.memory.total) * 100"
+                    :value="gpuMemoryPercent(gpu)"
                     :showValue="false"
                   />
                   <span class="metric-text">
-                    {{ formatFileSize(gpu.memory.used) }} / {{ formatFileSize(gpu.memory.total) }}
+                    {{ formatFileSize(gpuMemoryUsed(gpu)) }} / {{ formatFileSize(gpuMemoryTotal(gpu)) }}
                   </span>
                 </div>
               </div>
@@ -254,6 +254,19 @@ onMounted(() => {
       await systemStore.fetchSystemStatus()
     })
   )
+  unsubscribeCallbacks.push(
+    wsStore.subscribeToUnifiedMonitoring((data) => {
+      if (data.system) {
+        systemStore.updateSystemStatus({
+          system: data.system,
+          running_instances: data.models?.running_instances ?? systemStore.systemStatus.running_instances ?? []
+        })
+      }
+      if (data.gpu) {
+        systemStore.updateGpuInfo(data.gpu)
+      }
+    })
+  )
 })
 
 onUnmounted(() => {
@@ -277,6 +290,23 @@ const formatFileSize = (bytes) => {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+const gpuMemoryUsed = (gpu) => {
+  return gpu?.memory?.used ?? 0
+}
+
+const gpuMemoryTotal = (gpu) => {
+  return gpu?.memory?.total ?? 0
+}
+
+const gpuMemoryPercent = (gpu) => {
+  const total = gpuMemoryTotal(gpu)
+  const used = gpuMemoryUsed(gpu)
+  if (!total || total <= 0) {
+    return 0
+  }
+  return Math.min(100, Math.max(0, (used / total) * 100))
 }
 
 const formatDate = (dateString) => {

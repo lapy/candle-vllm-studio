@@ -1026,6 +1026,57 @@ const showQuickStartModal = ref(false)
 const realtimeRamData = ref(null)
 const realtimeVramData = ref(null)
 
+const normalizeGpuMemoryEntry = (gpu, index) => {
+  if (!gpu) return null
+  const idx = gpu.index ?? gpu.device_id ?? index
+  const total = gpu.memory?.total ?? gpu.total ?? 0
+  const used = gpu.memory?.used ?? gpu.used ?? 0
+  const free = gpu.memory?.free ?? gpu.free ?? Math.max(total - used, 0)
+  const percent = gpu.memory?.percent ?? (total ? (used / total) * 100 : 0)
+
+  return {
+    index: idx,
+    name: gpu.name ?? gpu.model ?? `GPU ${idx}`,
+    memory: {
+      total,
+      used,
+      free,
+      percent,
+    },
+    utilization: {
+      gpu: gpu.utilization?.gpu ?? gpu.utilization ?? 0,
+      memory: gpu.utilization?.memory ?? gpu.memory_utilization ?? 0,
+    },
+    temperature: gpu.temperature ?? null,
+    raw: gpu,
+  }
+}
+
+const normalizeVramData = (vramData) => {
+  if (!vramData) return null
+  const gpusArray = Array.isArray(vramData.gpus) ? vramData.gpus : []
+  const gpus = gpusArray
+    .map((gpu, idx) => normalizeGpuMemoryEntry(gpu, idx))
+    .filter(Boolean)
+
+  const totalFromGpus = gpus.reduce((sum, gpu) => sum + (gpu.memory?.total ?? 0), 0)
+  const usedFromGpus = gpus.reduce((sum, gpu) => sum + (gpu.memory?.used ?? 0), 0)
+
+  const total = vramData.total ?? vramData.total_vram ?? totalFromGpus
+  const used = vramData.used ?? vramData.used_vram ?? usedFromGpus
+  const free = vramData.free ?? vramData.free_vram ?? Math.max(total - used, 0)
+  const percent = vramData.percent ?? (total ? (used / total) * 100 : 0)
+
+  return {
+    ...vramData,
+    total,
+    used_vram: used,
+    free_vram: free,
+    percent,
+    gpus,
+  }
+}
+
 // Performance metrics from unified monitoring
 
 // Active tab index for tabbed interface
@@ -1469,7 +1520,7 @@ onMounted(async () => {
 
     // Extract VRAM data from unified stream
     if (data.gpu?.vram_data) {
-      realtimeVramData.value = data.gpu.vram_data
+      realtimeVramData.value = normalizeVramData(data.gpu.vram_data)
     }
 
     // Extract running instance data for performance metrics
