@@ -1665,30 +1665,38 @@ const regenerateModelInfo = async () => {
   }
 }
 
+const parseModelConfig = (rawConfig) => {
+  if (!rawConfig) return null
+  if (typeof rawConfig === 'string') {
+    try {
+      return JSON.parse(rawConfig)
+    } catch (error) {
+      console.error('Failed to parse model config string:', error)
+      return null
+    }
+  }
+  if (typeof rawConfig === 'object') {
+    return rawConfig
+  }
+  return null
+}
+
 const initializeConfig = () => {
   const defaults = getDefaultConfig()
-  if (model.value?.config) {
-    try {
-      const loaded = JSON.parse(model.value.config)
-      // Merge defaults to ensure all fields have safe values
-      config.value = { ...defaults, ...loaded }
-      // Ensure numeric/boolean fields are properly typed
-      for (const key in defaults) {
-        if (config.value[key] === undefined || config.value[key] === null) {
-          config.value[key] = defaults[key]
-        }
-        // Type coercion for critical fields
-        if (typeof defaults[key] === 'boolean' && typeof config.value[key] !== 'boolean') {
-          config.value[key] = Boolean(config.value[key])
-        }
-        if (typeof defaults[key] === 'number' && typeof config.value[key] !== 'number') {
-          const num = Number(config.value[key])
-          config.value[key] = isNaN(num) ? defaults[key] : num
-        }
+  const loadedConfig = parseModelConfig(model.value?.config)
+  if (loadedConfig) {
+    config.value = { ...defaults, ...loadedConfig }
+    for (const key in defaults) {
+      if (config.value[key] === undefined || config.value[key] === null) {
+        config.value[key] = defaults[key]
       }
-    } catch (error) {
-      console.error('Failed to parse model config:', error)
-      config.value = { ...defaults }
+      if (typeof defaults[key] === 'boolean' && typeof config.value[key] !== 'boolean') {
+        config.value[key] = Boolean(config.value[key])
+      }
+      if (typeof defaults[key] === 'number' && typeof config.value[key] !== 'number') {
+        const num = Number(config.value[key])
+        config.value[key] = Number.isNaN(num) ? defaults[key] : num
+      }
     }
   } else {
     config.value = { ...defaults }
@@ -2590,19 +2598,21 @@ const handleOnboardingSkip = () => {
 // Check if model has no configuration (empty state)
 const hasNoConfig = computed(() => {
   if (!model.value) return false
-  // Check if config is empty or just defaults
   if (!model.value.config) return true
-  try {
-    const parsed = JSON.parse(model.value.config)
-    // Check if it's essentially empty (only has default values)
-    const defaults = getDefaultConfig()
-    const hasNonDefaults = Object.keys(parsed).some(key => {
-      return parsed[key] !== defaults[key] && parsed[key] !== null && parsed[key] !== undefined && parsed[key] !== ''
-    })
-    return !hasNonDefaults
-  } catch {
-    return true
-  }
+  const parsed = parseModelConfig(model.value.config)
+  if (!parsed || typeof parsed !== 'object') return true
+  const defaults = getDefaultConfig()
+  const hasNonDefaults = Object.keys(parsed).some(key => {
+    const value = parsed[key]
+    const defaultValue = defaults[key]
+    if (value === null || value === undefined || value === '') return false
+    if (typeof defaultValue === 'number') {
+      const numericValue = Number(value)
+      return !Number.isNaN(numericValue) && numericValue !== defaultValue
+    }
+    return value !== defaultValue
+  })
+  return !hasNonDefaults
 })
 
 </script>
