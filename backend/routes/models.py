@@ -37,7 +37,7 @@ from backend.presets import get_architecture_and_presets
 from backend.logging_config import get_logger
 import psutil
 
-from backend.candle_manager import CandleRuntimeManager, CANDLE_DEFAULT_PORT_RANGE
+from backend.candle_manager import CandleRuntimeManager
 from backend.websocket_manager import websocket_manager
 
 router = APIRouter()
@@ -398,7 +398,6 @@ async def download_model_task(huggingface_id: str, filename: str,
         
         model.config = {
             "host": "0.0.0.0",
-            "port": 41234,
             "weights_path": weights_dir,
             "weights_file": weights_file,
             "kvcache_mem_gpu": 4096,
@@ -616,7 +615,6 @@ async def download_safetensors_bundle_task(
         # Default config for safetensors (recommend ISQ)
         model.config = {
             "host": "0.0.0.0",
-            "port": 41234,
             "weights_path": target_dir,
             "weights_file": None,  # Let candle-vllm find all shards
             "kvcache_mem_gpu": 4096,
@@ -911,30 +909,8 @@ async def start_model(
 
     model.config = stored_config
 
-    port_value = stored_config.get("port")
-    port: Optional[int] = None
-    if port_value not in (None, "", 0, "0"):
-        try:
-            port_candidate = int(port_value)
-            if port_candidate > 0:
-                port = port_candidate
-        except (TypeError, ValueError):
-            port = None
-
-    candle_port_min, candle_port_max = CANDLE_DEFAULT_PORT_RANGE
-    if port is None:
-        port = candle_port_min
-    elif not (candle_port_min <= port <= candle_port_max):
-        logger.warning(
-            "Requested port %s outside allowed candle-vllm range %s-%s, "
-            "falling back to %s",
-            port,
-            candle_port_min,
-            candle_port_max,
-            candle_port_min,
-        )
-        port = candle_port_min
-    stored_config["port"] = port
+    # Port selection is managed by the runtime manager; strip any stored value.
+    stored_config.pop("port", None)
 
     build_name = stored_config.get("build_name")
     if not build_name:
@@ -951,7 +927,6 @@ async def start_model(
         "weights_path": weights_path,
         "weights_file": weights_file,
         "host": stored_config.get("host", "0.0.0.0"),
-        "port": port,
         "kvcache_mem_gpu": gpu_cache_mb,
         "kvcache_mem_cpu": cpu_cache_mb,
         "max_num_seqs": stored_config.get("max_num_seqs"),

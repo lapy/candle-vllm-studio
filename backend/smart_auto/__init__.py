@@ -294,7 +294,6 @@ class SmartAutoConfig:
             "weights_path": weights_path,
             "weights_file": weights_file,
             "host": HOST_DEFAULT,
-            "port": 0,
             "kvcache_mem_gpu": kv_gpu_mb,
             "kvcache_mem_cpu": kv_cpu_mb,
             "dtype": precision.dtype,
