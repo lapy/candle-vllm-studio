@@ -161,13 +161,14 @@ async def _search_with_api(query: str, limit: int, model_type: str = "gguf") -> 
         # model_type == "all" means no filter
         
         # Use real HuggingFace API search with expand parameter for rich metadata
+        # NOTE: expand doesn't include file sizes, we'll fetch those on-demand
         models_generator = list_models(
             search=query,
             limit=min(limit * 2, 50),  # Get more models to filter from
             sort="downloads",
             direction=-1,
             filter=hf_filter,  # Filter based on model type
-            expand=["author", "cardData", "siblings"]  # Ensure author is present, plus metadata
+            expand=["author", "cardData"]  # Basic metadata without siblings to avoid size issues
         )
         
         # Convert generator to list
@@ -226,14 +227,22 @@ async def _process_single_model(model, model_type: str = "gguf") -> Optional[Dic
     try:
         logger.info(f"Processing model: {model.id} (type: {model_type})")
         
+        # Fetch full model info with file sizes (siblings from expand don't have sizes)
+        try:
+            full_model_info = hf_api.model_info(model.id, files_metadata=True)
+            siblings = full_model_info.siblings if hasattr(full_model_info, 'siblings') else []
+        except Exception as e:
+            logger.warning(f"Could not fetch full model info for {model.id}: {e}")
+            siblings = model.siblings if hasattr(model, 'siblings') else []
+        
         # Extract files based on model_type
         target_files = []
         quantizations = {}
         
-        if hasattr(model, 'siblings') and model.siblings:
+        if siblings:
             if model_type == "gguf" or model_type == "all":
                 # Extract GGUF files
-                gguf_files = [sibling.rfilename for sibling in model.siblings 
+                gguf_files = [sibling.rfilename for sibling in siblings 
                               if sibling.rfilename.endswith('.gguf')]
                 target_files.extend(gguf_files)
                 
@@ -264,14 +273,27 @@ async def _process_single_model(model, model_type: str = "gguf") -> Optional[Dic
         if model_type == "safetensors":
             # Check if model has safetensors in siblings
             has_safetensors = False
-            if hasattr(model, 'siblings') and model.siblings:
-                has_safetensors = any(s.rfilename.endswith('.safetensors') for s in model.siblings)
+            if siblings:
+                has_safetensors = any(s.rfilename.endswith('.safetensors') for s in siblings)
             
             if not has_safetensors:
                 return None
         
         # Extract rich metadata from model and cardData
-        metadata = _extract_model_metadata(model)
+        # Create a temporary model object with updated siblings that have file sizes
+        model_with_sizes = type('obj', (object,), {
+            'id': model.id,
+            'siblings': siblings,
+            'cardData': model.cardData if hasattr(model, 'cardData') else None,
+            'pipeline_tag': getattr(model, 'pipeline_tag', ''),
+            'library_name': getattr(model, 'library_name', ''),
+            'gated': getattr(model, 'gated', False),
+            'private': getattr(model, 'private', False),
+            'createdAt': getattr(model, 'createdAt', None),
+            'lastModified': getattr(model, 'lastModified', None),
+        })()
+        
+        metadata = _extract_model_metadata(model_with_sizes)
         
         result = {
             "id": model.id,
@@ -482,19 +504,26 @@ def _extract_safetensors_metadata(siblings) -> Dict:
     
     for sibling in siblings:
         if sibling.rfilename.endswith('.safetensors'):
+            # Get size from sibling object (might be 'size' or 'blob_size' attribute)
+            file_size = 0
+            if hasattr(sibling, 'size') and sibling.size:
+                file_size = sibling.size
+            elif hasattr(sibling, 'blob_size') and sibling.blob_size:
+                file_size = sibling.blob_size
+            
             safetensors_files.append({
                 "filename": sibling.rfilename,
-                "size": sibling.size or 0,
-                "size_mb": round((sibling.size or 0) / (1024 * 1024), 2)
+                "size": file_size,
+                "size_mb": round(file_size / (1024 * 1024), 2) if file_size > 0 else 0
             })
-            total_size += sibling.size or 0
+            total_size += file_size
     
     if safetensors_files:
         safetensors_info.update({
             "has_safetensors": True,
             "safetensors_files": safetensors_files,
             "total_size": total_size,
-            "total_size_mb": round(total_size / (1024 * 1024), 2)
+            "total_size_mb": round(total_size / (1024 * 1024), 2) if total_size > 0 else 0
         })
     
     return safetensors_info
