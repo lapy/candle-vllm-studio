@@ -219,6 +219,19 @@
                   <i class="pi pi-lightbulb"></i>
                   <span>Use <code>--isq q4k</code> for in-situ quantization when loading this model</span>
                 </div>
+                
+                <!-- Download Bundle Button -->
+                <div class="safetensors-download-section">
+                  <Button 
+                    :label="isSafetensorsModelDownloaded(model.id) ? 'Already Downloaded' : `Download All Files (${model.safetensors.safetensors_files?.length || 0} shards)`"
+                    :icon="isSafetensorsModelDownloaded(model.id) ? 'pi pi-check' : 'pi pi-download'"
+                    @click="downloadSafetensorsBundle(model.id)"
+                    :disabled="isSafetensorsModelDownloaded(model.id) || (downloadingModels[model.id]?.size > 0)"
+                    :loading="downloadingModels[model.id]?.size > 0"
+                    class="download-bundle-button"
+                    :severity="isSafetensorsModelDownloaded(model.id) ? 'success' : 'primary'"
+                  />
+                </div>
               </div>
               
               <!-- Available GGUF Quantizations Section -->
@@ -671,6 +684,51 @@ const isModelDownloaded = (huggingfaceId, quantization) => {
   )
 }
 
+const isSafetensorsModelDownloaded = (huggingfaceId) => {
+  // Check if this safetensors model is already downloaded
+  return modelStore.allQuantizations.some(model => 
+    model.huggingface_id === huggingfaceId && 
+    model.quantization === 'safetensors'
+  )
+}
+
+const downloadSafetensorsBundle = async (modelId) => {
+  const model = Array.isArray(modelStore.searchResults) ? 
+    modelStore.searchResults.find(m => m.id === modelId) : null
+  
+  if (!model) return
+  
+  try {
+    // Initialize Set for this model if doesn't exist
+    if (!downloadingModels.value[modelId]) {
+      downloadingModels.value[modelId] = new Set()
+    }
+    
+    // Get total size from safetensors metadata
+    const totalBytes = model.safetensors?.total_size || 0
+    
+    console.log(`Downloading safetensors bundle for ${model.id}: ${totalBytes} bytes`)
+    
+    const response = await modelStore.downloadSafetensorsBundle(model.id, totalBytes)
+    
+    // Store the task_id for tracking
+    const taskId = response.task_id
+    if (taskId) {
+      downloadingModels.value[modelId].add(taskId)
+    }
+    
+    toast.success(`Downloading ${model.name} (all safetensors files)`)
+  } catch (error) {
+    // Handle 409 Conflict - already downloading
+    if (error.response?.status === 409) {
+      toast.warning('This model bundle is already being downloaded')
+    } else {
+      toast.error('Failed to start bundle download')
+    }
+    console.error('Bundle download error:', error)
+  }
+}
+
 const formatNumber = (num) => {
   if (num >= 1000000) {
     return (num / 1000000).toFixed(1) + 'M'
@@ -1014,6 +1072,16 @@ const getModelDownloadProgress = (modelId) => {
   font-family: 'Fira Code', 'Courier New', monospace;
   font-size: 0.7rem;
   color: var(--accent-cyan);
+}
+
+.safetensors-download-section {
+  margin-top: var(--spacing-sm);
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--border-secondary);
+}
+
+.download-bundle-button {
+  width: 100%;
 }
 
 .downloaded-quantizations {

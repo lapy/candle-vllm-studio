@@ -98,6 +98,21 @@ const downloadModel = async (huggingfaceId, filename, totalBytes = 0) => {
   }
 }
 
+const downloadSafetensorsBundle = async (huggingfaceId, totalBytes = 0) => {
+  try {
+    const response = await axios.post('/api/models/download-safetensors-bundle', {
+      huggingface_id: huggingfaceId,
+      total_bytes: totalBytes
+    })
+    // Refresh models list after download starts
+    await fetchModels()
+    return response.data
+  } catch (error) {
+    console.error('Failed to download safetensors bundle:', error)
+    throw error
+  }
+}
+
   const deleteModel = async (modelId) => {
     try {
       await axios.delete(`/api/models/${modelId}`)
@@ -250,6 +265,7 @@ const downloadModel = async (huggingfaceId, filename, totalBytes = 0) => {
     fetchModels,
     searchModels,
     downloadModel,
+    downloadSafetensorsBundle,
     deleteModel,
     deleteModelGroup,
     fetchHuggingfaceTokenStatus,
