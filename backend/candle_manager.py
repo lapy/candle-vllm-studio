@@ -348,9 +348,13 @@ class CandleRuntimeManager:
             cmd.append("--")
             workdir = self._repo_path
 
+        # Always specify weights path (directory)
         cmd.extend(["--w", str(weights_path)])
+        
+        # Only specify weights file for GGUF models (safetensors use directory)
         if weights_file:
             cmd.extend(["--f", str(weights_file)])
+        
         cmd.extend(["--h", str(host)])
         cmd.extend(["--p", str(port)])
 
@@ -432,9 +436,18 @@ class CandleRuntimeManager:
 
         return path
 
-    def _resolve_weights_file(self, config: Dict[str, Any], weights_dir: Path) -> Path:
-        """Resolve the GGUF weights file path for candle-vllm."""
+    def _resolve_weights_file(self, config: Dict[str, Any], weights_dir: Path) -> Optional[Path]:
+        """Resolve the weights file path for candle-vllm.
+        
+        Returns None for safetensors models (directory-based loading).
+        Returns Path for GGUF models (file-based loading).
+        """
         raw_file = config.get("weights_file") or config.get("weights_filename")
+
+        # If explicitly set to None (safetensors case), return None
+        if raw_file is None and config.get("quantization") == "safetensors":
+            logger.info("Safetensors model detected - using directory-based loading")
+            return None
 
         if raw_file:
             candidate = Path(str(raw_file)).expanduser()
@@ -447,12 +460,20 @@ class CandleRuntimeManager:
                 raise FileNotFoundError(f"Weights file path must be a file, got: {candidate}")
             return candidate
 
+        # Auto-detect: look for GGUF files first, then safetensors
         gguf_files = sorted(p for p in weights_dir.glob("*.gguf") if p.is_file())
-        if not gguf_files:
-            raise FileNotFoundError(
-                f"No GGUF files found in weights directory {weights_dir}"
-            )
-        return gguf_files[0]
+        if gguf_files:
+            return gguf_files[0]
+        
+        # Check for safetensors files
+        safetensors_files = sorted(p for p in weights_dir.glob("*.safetensors") if p.is_file())
+        if safetensors_files:
+            logger.info("Safetensors files detected - using directory-based loading")
+            return None  # Let candle-vllm auto-discover all shards
+        
+        raise FileNotFoundError(
+            f"No GGUF or safetensors files found in weights directory {weights_dir}"
+        )
 
     def _normalise_mem_to_mb(self, value: Any) -> Optional[int]:
         if value in (None, "", 0, "0"):

@@ -55,6 +55,18 @@ class ModelProfile:
     @property
     def is_gguf(self) -> bool:
         return self.file_path.endswith(".gguf")
+    
+    @property
+    def is_safetensors(self) -> bool:
+        """Check if this is a safetensors model (directory or quantization marker)."""
+        return self.quantization == "safetensors" or any(
+            Path(self.file_path).glob("*.safetensors")
+        ) if Path(self.file_path).is_dir() else False
+    
+    @property
+    def needs_isq(self) -> bool:
+        """Check if model needs ISQ quantization (unquantized safetensors)."""
+        return self.is_safetensors and self.quantization == "safetensors"
 
     @property
     def context_length(self) -> int:
@@ -68,6 +80,8 @@ class ModelProfile:
             "context_length": self.context_length,
             "architecture": self.metadata.architecture,
             "is_moe": getattr(self.metadata, "is_moe", False),
+            "is_safetensors": self.is_safetensors,
+            "needs_isq": self.needs_isq,
         }
 
 
@@ -628,6 +642,39 @@ class SmartAutoConfig:
                 fp8_kv_cache=_should_enable_fp8(hardware, slider),
             )
 
+        # Safetensors models - recommend ISQ quantization
+        if model_profile.is_safetensors:
+            preferred = _prefer_quant(bucket)
+            quant = _adjust_quant_for_vram(
+                preferred,
+                hardware.available_vram_gb,
+                model_profile.size_gb,
+            )
+            dtype = "bf16"  # Use BF16 for safetensors (better than F16)
+            quant_key = quant or dtype
+
+            decisions.record(
+                "dtype",
+                dtype,
+                "Safetensors model detected; using BF16 with ISQ quantization",
+                {**context, "preferred": preferred, "selected": quant_key, "is_safetensors": True},
+            )
+            decisions.record(
+                "isq",
+                quant,
+                "Apply ISQ for safetensors model (recommended for chat completions)",
+                {**context, "preferred": preferred, "selected": quant, "format": "safetensors"},
+            )
+
+            return PrecisionChoice(
+                dtype=dtype,
+                isq=quant,
+                quant_key=quant or dtype,
+                model_vram_gb=model_profile.size_gb * QUANTIZATION_FACTORS.get(quant or dtype, 1.0),
+                fp8_kv_cache=_should_enable_fp8(hardware, slider),
+            )
+
+        # Default: raw weights (non-GGUF, non-safetensors)
         preferred = _prefer_quant(bucket)
         quant = _adjust_quant_for_vram(
             preferred,
