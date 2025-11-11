@@ -327,7 +327,8 @@ class CandleRuntimeManager:
         weights_path = self._resolve_weights_directory(config)
         weights_file = self._resolve_weights_file(config, weights_path)
         config["weights_path"] = str(weights_path)
-        config["weights_file"] = str(weights_file)
+        # Don't stringify None for safetensors models
+        config["weights_file"] = str(weights_file) if weights_file else None
 
         dtype = config.get("dtype")
         isq = config.get("isq")
@@ -400,9 +401,9 @@ class CandleRuntimeManager:
         if block_size:
             cmd.extend(["--block-size", str(int(block_size))])
         model_name = config.get("model_name")
-        weights_file = config.get("weights_file")
-        weights_path = config.get("weights_path")
-        if model_name and not weights_file and not weights_path:
+        # Use resolved weights_file and weights_path from earlier (don't re-read from config)
+        # Only pass --m if no local weights are provided
+        if model_name and not weights_file and not str(weights_path):
             cmd.extend(["--m", str(model_name)])
         if dtype:
             cmd.extend(["--dtype", str(dtype)])
