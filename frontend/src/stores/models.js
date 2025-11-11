@@ -61,10 +61,14 @@ export const useModelStore = defineStore('models', () => {
     }
   }
 
-  const searchModels = async (query, limit = 20) => {
+  const searchModels = async (query, limit = 20, modelType = 'gguf') => {
     searchLoading.value = true
     try {
-      const response = await axios.post('/api/models/search', { query, limit })
+      const response = await axios.post('/api/models/search', { 
+        query, 
+        limit,
+        model_type: modelType 
+      })
       // Ensure searchResults is always an array
       searchResults.value = Array.isArray(response.data) ? response.data : []
       return searchResults.value

@@ -82,20 +82,42 @@
 
       <!-- Search Section -->
       <div class="search-section">
-        <div class="search-bar">
-          <InputText 
-            v-model="searchQuery"
-            placeholder="Search HuggingFace for GGUF models..."
-            @keyup.enter="performSearch"
-            class="search-input"
-          />
-          <Button 
-            label="Search" 
-            icon="pi pi-search"
-            @click="performSearch"
-            :loading="modelStore.searchLoading"
-            :disabled="!searchQuery.trim()"
-          />
+        <div class="search-controls">
+          <div class="search-bar">
+            <InputText 
+              v-model="searchQuery"
+              placeholder="Search HuggingFace for models..."
+              @keyup.enter="performSearch"
+              class="search-input"
+            />
+            <Button 
+              label="Search" 
+              icon="pi pi-search"
+              @click="performSearch"
+              :loading="modelStore.searchLoading"
+              :disabled="!searchQuery.trim()"
+            />
+          </div>
+          <div class="model-type-filter">
+            <label for="model-type-dropdown">Model Type:</label>
+            <Dropdown 
+              id="model-type-dropdown"
+              v-model="selectedModelType"
+              :options="modelTypeOptions"
+              optionLabel="label"
+              optionValue="value"
+              class="model-type-dropdown"
+            />
+          </div>
+        </div>
+        <div v-if="selectedModelType !== 'gguf'" class="model-type-info">
+          <i class="pi pi-info-circle"></i>
+          <span v-if="selectedModelType === 'safetensors'">
+            Safetensors models work better with chat completions in candle-vllm. Use <code>--isq q4k</code> for in-situ quantization.
+          </span>
+          <span v-else>
+            Showing all model types. Safetensors models are recommended for chat completions.
+          </span>
         </div>
       </div>
 
@@ -177,41 +199,65 @@
                 </div>
               </div>
               
-              <!-- Available Quantizations Section -->
-              <h4>Available Quantizations:</h4>
-              <div class="quantization-selector">
-                <Dropdown 
-                  v-model="selectedQuantization[model.id]"
-                  :options="getQuantizationOptions(model.quantizations, model.id)"
-                  optionLabel="label"
-                  optionValue="value"
-                  :placeholder="loadingQuantizationSizes[model.id] ? 'Loading sizes...' : 'Select quantization'"
-                  class="quantization-dropdown"
-                  :loading="loadingQuantizationSizes[model.id]"
-                  @change="onQuantizationChange(model.id, $event.value)"
-                  @show="onDropdownOpen(model.id)"
-                />
-                <div v-if="loadingQuantizationSizes[model.id]" class="loading-indicator">
-                  <i class="pi pi-spin pi-spinner"></i>
-                  <span>Fetching file sizes...</span>
+              <!-- Safetensors Information (for safetensors models) -->
+              <div v-if="model.safetensors?.has_safetensors" class="safetensors-info">
+                <h4>
+                  <i class="pi pi-file"></i>
+                  Safetensors Model
+                </h4>
+                <div class="safetensors-details">
+                  <div class="safetensors-detail-item">
+                    <span class="label">Files:</span>
+                    <span class="value">{{ model.safetensors.safetensors_files?.length || 0 }}</span>
+                  </div>
+                  <div class="safetensors-detail-item">
+                    <span class="label">Total Size:</span>
+                    <span class="value">{{ formatFileSize((model.safetensors.total_size || 0)) }}</span>
+                  </div>
+                </div>
+                <div class="safetensors-usage-hint">
+                  <i class="pi pi-lightbulb"></i>
+                  <span>Use <code>--isq q4k</code> for in-situ quantization when loading this model</span>
                 </div>
               </div>
-              <div v-if="selectedQuantization[model.id]" class="selected-quantization-info">
-                <div class="quant-info">
-                  <div class="quant-name-row">
-                    <span class="quant-name">{{ selectedQuantization[model.id] }}</span>
+              
+              <!-- Available GGUF Quantizations Section -->
+              <div v-if="model.quantizations && Object.keys(model.quantizations).length > 0">
+                <h4>Available GGUF Quantizations:</h4>
+                <div class="quantization-selector">
+                  <Dropdown 
+                    v-model="selectedQuantization[model.id]"
+                    :options="getQuantizationOptions(model.quantizations, model.id)"
+                    optionLabel="label"
+                    optionValue="value"
+                    :placeholder="loadingQuantizationSizes[model.id] ? 'Loading sizes...' : 'Select quantization'"
+                    class="quantization-dropdown"
+                    :loading="loadingQuantizationSizes[model.id]"
+                    @change="onQuantizationChange(model.id, $event.value)"
+                    @show="onDropdownOpen(model.id)"
+                  />
+                  <div v-if="loadingQuantizationSizes[model.id]" class="loading-indicator">
+                    <i class="pi pi-spin pi-spinner"></i>
+                    <span>Fetching file sizes...</span>
                   </div>
-                  <span v-if="getQuantizationSizeWithUnit(model.quantizations, selectedQuantization[model.id])" class="quant-size">{{ getQuantizationSizeWithUnit(model.quantizations, selectedQuantization[model.id]) }}</span>
                 </div>
-                <Button 
-                  :label="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'Downloaded' : 'Download'"
-                  :icon="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'pi pi-check' : 'pi pi-download'"
-                  @click="downloadSelectedQuantization(model.id)"
-                  :disabled="isModelDownloaded(model.id, selectedQuantization[model.id]) || (downloadingModels[model.id]?.size > 0) || !selectedQuantization[model.id]"
-                  :loading="downloadingModels[model.id]?.size > 0"
-                  class="download-button"
-                  :severity="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'success' : 'success'"
-                />
+                <div v-if="selectedQuantization[model.id]" class="selected-quantization-info">
+                  <div class="quant-info">
+                    <div class="quant-name-row">
+                      <span class="quant-name">{{ selectedQuantization[model.id] }}</span>
+                    </div>
+                    <span v-if="getQuantizationSizeWithUnit(model.quantizations, selectedQuantization[model.id])" class="quant-size">{{ getQuantizationSizeWithUnit(model.quantizations, selectedQuantization[model.id]) }}</span>
+                  </div>
+                  <Button 
+                    :label="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'Downloaded' : 'Download'"
+                    :icon="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'pi pi-check' : 'pi pi-download'"
+                    @click="downloadSelectedQuantization(model.id)"
+                    :disabled="isModelDownloaded(model.id, selectedQuantization[model.id]) || (downloadingModels[model.id]?.size > 0) || !selectedQuantization[model.id]"
+                    :loading="downloadingModels[model.id]?.size > 0"
+                    class="download-button"
+                    :severity="isModelDownloaded(model.id, selectedQuantization[model.id]) ? 'success' : 'success'"
+                  />
+                </div>
               </div>
               
               <!-- Download Progress - Multiple concurrent downloads -->
@@ -293,6 +339,14 @@ const downloadingModels = ref({}) // {[modelId]: Set of task_ids}
 const downloadProgress = ref({}) // {[task_id]: {modelId, quantization, progress, ...}}
 const loadingQuantizationSizes = ref({})
 const activeDownloadPolling = ref(null) // Polling interval ID
+const selectedModelType = ref('gguf') // Default to GGUF for backward compatibility
+
+// Model type options
+const modelTypeOptions = [
+  { label: 'GGUF (Pre-quantized)', value: 'gguf' },
+  { label: 'Safetensors (Recommended)', value: 'safetensors' },
+  { label: 'All Types', value: 'all' }
+]
 
 onMounted(async () => {
   await modelStore.fetchModels()
@@ -385,7 +439,7 @@ const performSearch = async () => {
   if (!searchQuery.value.trim()) return
   
   try {
-    await modelStore.searchModels(searchQuery.value)
+    await modelStore.searchModels(searchQuery.value, 20, selectedModelType.value)
   } catch (error) {
     toast.error('Failed to search for models')
   }
@@ -725,6 +779,12 @@ const getModelDownloadProgress = (modelId) => {
   border: 1px solid var(--border-primary);
 }
 
+.search-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
 .search-bar {
   display: flex;
   gap: var(--spacing-sm);
@@ -733,6 +793,49 @@ const getModelDownloadProgress = (modelId) => {
 
 .search-input {
   flex: 1;
+}
+
+.model-type-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.model-type-filter label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.model-type-dropdown {
+  min-width: 250px;
+}
+
+.model-type-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.model-type-info i {
+  color: var(--accent-cyan);
+  font-size: 1rem;
+}
+
+.model-type-info code {
+  padding: 2px 6px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-xs);
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 0.8rem;
+  color: var(--accent-cyan);
 }
 
 .search-results {
@@ -848,6 +951,69 @@ const getModelDownloadProgress = (modelId) => {
   font-size: 0.875rem;
   color: var(--text-primary);
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.safetensors-info {
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--accent-green);
+  border-radius: var(--radius-sm);
+}
+
+.safetensors-info h4 {
+  color: var(--accent-green);
+  margin-bottom: var(--spacing-sm);
+}
+
+.safetensors-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-sm);
+}
+
+.safetensors-detail-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+}
+
+.safetensors-detail-item .label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.safetensors-detail-item .value {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.safetensors-usage-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-xs);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.safetensors-usage-hint i {
+  color: var(--accent-orange);
+}
+
+.safetensors-usage-hint code {
+  padding: 2px 4px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-xs);
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: var(--accent-cyan);
 }
 
 .downloaded-quantizations {
@@ -1219,6 +1385,15 @@ const getModelDownloadProgress = (modelId) => {
   
   .search-bar {
     flex-direction: column;
+  }
+  
+  .model-type-filter {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .model-type-dropdown {
+    min-width: 100%;
   }
   
   .token-input {
