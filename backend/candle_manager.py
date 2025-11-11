@@ -1,12 +1,17 @@
 import asyncio
+import json
 import os
 import socket
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
 import psutil
+import uvicorn
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response, StreamingResponse
 
 from backend.logging_config import get_logger
 
@@ -39,7 +44,9 @@ class RuntimeProcess:
     """Holds runtime process metadata."""
 
     model_id: int
-    port: int
+    internal_port: int
+    external_port: int
+    alias: str
     process: asyncio.subprocess.Process
     config: Dict[str, Any] = field(default_factory=dict)
     log_task: Optional[asyncio.Task] = None
@@ -95,11 +102,18 @@ class CandleRuntimeManager:
             raise RuntimeError(f"Model {model_id} already running")
 
         runtime_config = dict(config)  # shallow copy to avoid mutation
-        port = runtime_config.get("port") or _find_free_port()
-        runtime_config["port"] = port
+        runtime_config["host"] = runtime_config.get("host", "127.0.0.1")
+        internal_port = _find_free_port(CANDLE_DEFAULT_PORT_RANGE[1] + 1, 65000)
+        runtime_config["_internal_port"] = internal_port
+        runtime_config["port"] = internal_port
 
         cmd, env, workdir = self._build_command(runtime_config)
-        logger.info("Starting candle-vllm model_id=%s on port=%s", model_id, port)
+        logger.info(
+            "Starting candle-vllm model_id=%s on proxy port=%s (internal=%s)",
+            model_id,
+            proxy_server.port,
+            internal_port,
+        )
         logger.debug("Command: %s", " ".join(cmd))
 
         process = await asyncio.create_subprocess_exec(
@@ -112,7 +126,7 @@ class CandleRuntimeManager:
 
         try:
             await self._wait_for_health(
-                port=port,
+                port=internal_port,
                 timeout=runtime_config.get("startup_timeout", 180),
                 health_endpoints=runtime_config.get(
                     "health_endpoints", ["/v1/models"]
@@ -137,27 +151,45 @@ class CandleRuntimeManager:
                 f"candle-vllm failed to start (exit code {exit_code}): {exc}"
             ) from exc
 
+        alias = self._derive_model_alias(runtime_config, model_id)
+        runtime_config["model_alias"] = alias
+        await proxy_server.register_runtime(
+            runtime_id=model_id,
+            alias=alias,
+            internal_port=internal_port,
+            metadata={
+                "model_name": runtime_config.get("model_name"),
+                "weights_file": runtime_config.get("weights_file"),
+                "weights_path": runtime_config.get("weights_path"),
+            },
+        )
+
         log_task = self._loop.create_task(
             self._stream_logs(model_id, process, websocket_manager)
         )
         health_task = self._loop.create_task(
-            self._monitor_health(model_id, port, runtime_config, websocket_manager)
+            self._monitor_health(
+                model_id, internal_port, runtime_config, websocket_manager
+            )
         )
 
         self._runtimes[model_id] = RuntimeProcess(
             model_id=model_id,
-            port=port,
+            internal_port=internal_port,
+            external_port=proxy_server.port,
+            alias=alias,
             process=process,
             config=runtime_config,
             log_task=log_task,
-            health_task=health_task
+            health_task=health_task,
         )
 
         return {
             "model_id": model_id,
-            "port": port,
+            "port": proxy_server.port,
             "pid": process.pid,
-            "endpoint": f"http://{runtime_config.get('host', '127.0.0.1')}:{port}/v1"
+            "alias": alias,
+            "endpoint": f"http://{runtime_config.get('host', '127.0.0.1')}:{proxy_server.port}/v1",
         }
 
     async def stop_model(self, model_id: int, force: bool = False) -> None:
@@ -184,6 +216,7 @@ class CandleRuntimeManager:
                 runtime.log_task.cancel()
             if runtime.health_task:
                 runtime.health_task.cancel()
+            await proxy_server.unregister_runtime(model_id)
             self._runtimes.pop(model_id, None)
 
     async def restart_model(self, model_id: int, websocket_manager=None) -> Dict[str, Any]:
@@ -434,6 +467,18 @@ class CandleRuntimeManager:
             return int(mem_val * 1024)
         return int(mem_val)
 
+    def _derive_model_alias(self, config: Dict[str, Any], model_id: int) -> str:
+        candidates = [
+            config.get("model_name"),
+            Path(config.get("weights_file", "")).stem if config.get("weights_file") else None,
+            Path(config.get("weights_path", "")).stem if config.get("weights_path") else None,
+        ]
+        alias = next((str(candidate) for candidate in candidates if candidate), f"model-{model_id}")
+        existing_aliases = {runtime.alias for runtime in self._runtimes.values()}
+        if alias in existing_aliases:
+            alias = f"{alias}-{model_id}"
+        return alias
+
     def _resolve_binary_from_config(self, config: Dict[str, Any]) -> Optional[str]:
         """Resolve candle-vllm binary from runtime configuration or active builds."""
         explicit = config.get("binary_path")
@@ -592,4 +637,195 @@ class CandleRuntimeManager:
                 pass
 
 
+class CandleProxyServer:
+    """Global proxy that fronts all candle-vllm runtimes on a fixed OpenAI-compatible endpoint."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 3000) -> None:
+        self.host = host
+        self.port = port
+        self._app = FastAPI()
+        self._runtimes: Dict[int, Dict[str, Any]] = {}
+        self._alias_index: Dict[str, int] = {}
+        self._lock = asyncio.Lock()
+        self._startup_lock = asyncio.Lock()
+        self._server: Optional[uvicorn.Server] = None
+        self._server_task: Optional[asyncio.Task] = None
+        self._client: Optional[httpx.AsyncClient] = None
+
+        @self._app.get("/v1/models")
+        async def list_models():
+            return await self._handle_list_models()
+
+        @self._app.get("/v1/models/{model_id}")
+        async def get_model(model_id: str):
+            return await self._handle_get_model(model_id)
+
+        @self._app.api_route(
+            "/v1/{path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+        )
+        async def forward(path: str, request: Request):
+            return await self._forward_request(path, request)
+
+    async def ensure_running(self) -> None:
+        async with self._startup_lock:
+            if self._server and self._server.started:
+                return
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=None)
+            config = uvicorn.Config(
+                self._app,
+                host=self.host,
+                port=self.port,
+                loop="asyncio",
+                log_level="error",
+            )
+            self._server = uvicorn.Server(config)
+            self._server_task = asyncio.create_task(self._server.serve())
+            while not self._server.started:
+                await asyncio.sleep(0.05)
+
+    async def register_runtime(
+        self,
+        runtime_id: int,
+        alias: str,
+        internal_port: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        await self.ensure_running()
+        async with self._lock:
+            info = {
+                "alias": alias,
+                "internal_port": internal_port,
+                "metadata": metadata or {},
+                "created": int(time.time() * 1000),
+            }
+            self._runtimes[runtime_id] = info
+            self._alias_index[alias] = runtime_id
+
+    async def unregister_runtime(self, runtime_id: int) -> None:
+        async with self._lock:
+            info = self._runtimes.pop(runtime_id, None)
+            if info:
+                self._alias_index.pop(info["alias"], None)
+
+    async def _handle_list_models(self) -> Dict[str, Any]:
+        async with self._lock:
+            data = [
+                {
+                    "id": info["alias"],
+                    "object": "model",
+                    "created": info["created"],
+                    "owned_by": "candle-vllm",
+                    "metadata": info.get("metadata", {}),
+                }
+                for info in self._runtimes.values()
+            ]
+        return {"object": "list", "data": data}
+
+    async def _handle_get_model(self, model_id: str) -> Dict[str, Any]:
+        async with self._lock:
+            info = self._lookup_runtime_locked(model_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return {
+            "id": info["alias"],
+            "object": "model",
+            "created": info["created"],
+            "owned_by": "candle-vllm",
+            "metadata": info.get("metadata", {}),
+        }
+
+    async def _forward_request(self, path: str, request: Request) -> Response:
+        body = await request.body()
+        model_name: Optional[str] = None
+        if body:
+            try:
+                payload = json.loads(body)
+                model_name = payload.get("model")
+            except json.JSONDecodeError:
+                model_name = None
+        if not model_name:
+            model_name = request.query_params.get("model")
+
+        async with self._lock:
+            info = self._lookup_runtime_locked(model_name)
+            if info is None:
+                message = (
+                    "No suitable model available"
+                    if not self._runtimes
+                    else "Model must be specified when multiple runtimes are active"
+                )
+                raise HTTPException(status_code=400, detail=message)
+            internal_port = info["internal_port"]
+
+        upstream_url = f"http://127.0.0.1:{internal_port}/v1/{path}"
+        headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+        params = request.query_params.multi_items()
+
+        async with self._client.stream(
+            request.method,
+            upstream_url,
+            params=params or None,
+            headers=headers,
+            content=body or None,
+        ) as upstream:
+            response_headers = {
+                k: v
+                for k, v in upstream.headers.items()
+                if k.lower() not in {"content-length", "transfer-encoding", "connection"}
+            }
+            content_type = upstream.headers.get("content-type", "")
+
+            if content_type.startswith("text/event-stream"):
+                async def iterator():
+                    async for chunk in upstream.aiter_bytes():
+                        yield chunk
+
+                return StreamingResponse(
+                    iterator(),
+                    status_code=upstream.status_code,
+                    headers=response_headers,
+                    media_type=content_type or None,
+                )
+
+            content = await upstream.aread()
+            response_headers["content-length"] = str(len(content))
+            return Response(
+                content=content,
+                status_code=upstream.status_code,
+                headers=response_headers,
+                media_type=content_type or None,
+            )
+
+    def _lookup_runtime_locked(self, identifier: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not self._runtimes:
+            return None
+        runtime_id: Optional[int] = None
+
+        if identifier:
+            runtime_id = self._alias_index.get(identifier)
+            if runtime_id is None:
+                try:
+                    runtime_id = int(identifier)
+                except (TypeError, ValueError):
+                    runtime_id = None
+            if runtime_id is None or runtime_id not in self._runtimes:
+                for candidate_id, info in self._runtimes.items():
+                    if info["alias"] == identifier:
+                        runtime_id = candidate_id
+                        break
+        else:
+            if len(self._runtimes) == 1:
+                runtime_id = next(iter(self._runtimes))
+
+        if runtime_id is None or runtime_id not in self._runtimes:
+            return None
+
+        info = dict(self._runtimes[runtime_id])
+        info["runtime_id"] = runtime_id
+        return info
+
+
+proxy_server = CandleProxyServer()
 
