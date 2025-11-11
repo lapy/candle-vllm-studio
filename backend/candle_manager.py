@@ -59,6 +59,10 @@ class CandleRuntimeManager:
         self._runtimes: Dict[int, RuntimeProcess] = {}
         self._binary_path = self._resolve_binary_path()
         self._repo_path = self._resolve_repo_path()
+        self._data_dir = Path(
+            os.getenv("CANDLE_STUDIO_DATA", os.path.join(os.getcwd(), "data"))
+        ).expanduser()
+        self._builds_dir = self._data_dir / "candle-builds"
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -229,7 +233,10 @@ class CandleRuntimeManager:
 
     def _build_command(self, config: Dict[str, Any]):
         """Construct the command to launch candle-vllm."""
-        if not self._binary_path and not self._repo_path:
+        binary_path = self._binary_path or self._resolve_binary_from_config(config)
+        repo_path = self._repo_path
+
+        if not binary_path and not repo_path:
             raise RuntimeError(
                 "Neither CANDLE_VLLM_BINARY nor CANDLE_VLLM_PATH is configured. "
                 "Set CANDLE_VLLM_BINARY to a compiled candle-vllm binary or "
@@ -250,8 +257,8 @@ class CandleRuntimeManager:
         env = os.environ.copy()
         env.update(env_overrides)
 
-        if self._binary_path:
-            cmd = [self._binary_path]
+        if binary_path:
+            cmd = [binary_path]
             workdir = None
         else:
             cmd = ["cargo", "run"]
@@ -284,6 +291,41 @@ class CandleRuntimeManager:
             cmd.append(str(arg))
 
         return cmd, env, workdir
+
+    def _resolve_binary_from_config(self, config: Dict[str, Any]) -> Optional[str]:
+        """Resolve candle-vllm binary from runtime configuration or active builds."""
+        explicit = config.get("binary_path")
+        if explicit:
+            path = Path(explicit).expanduser()
+            if not path.exists():
+                raise FileNotFoundError(f"Configured candle-vllm binary not found: {path}")
+            if not os.access(path, os.X_OK):
+                raise PermissionError(f"Configured candle-vllm binary is not executable: {path}")
+            return str(path)
+
+        build_name = config.get("build_name")
+        if not build_name:
+            return None
+
+        candidates = []
+        if self._builds_dir:
+            candidates.append(self._builds_dir / build_name / "candle-vllm")
+
+        for candidate in candidates:
+            if candidate.exists():
+                if not os.access(candidate, os.X_OK):
+                    try:
+                        candidate.chmod(candidate.stat().st_mode | 0o111)
+                    except PermissionError:
+                        logger.warning("Unable to mark candle-vllm binary as executable: %s", candidate)
+                return str(candidate)
+
+        logger.error(
+            "Build '%s' is active but no candle-vllm binary was found in %s",
+            build_name,
+            candidates[0].parent if candidates else "unknown location",
+        )
+        return None
 
     async def _wait_for_health(
         self,

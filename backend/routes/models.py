@@ -5,9 +5,16 @@ from pydantic import BaseModel
 import os
 import time
 import asyncio
+import json
 from datetime import datetime
 
-from backend.database import get_db, Model, RunningInstance, generate_runtime_alias
+from backend.database import (
+    CandleBuild,
+    get_db,
+    Model,
+    RunningInstance,
+    generate_runtime_alias,
+)
 from backend.dependencies import get_runtime_manager
 from backend.huggingface import (
     search_models,
@@ -500,7 +507,27 @@ async def start_model(
     if existing:
         raise HTTPException(status_code=400, detail="Model already running")
 
-    stored_config = model.config if isinstance(model.config, dict) else {}
+    stored_config: Dict[str, Any] = {}
+    if isinstance(model.config, dict):
+        stored_config = model.config
+    elif isinstance(model.config, str) and model.config.strip():
+        try:
+            stored_config = json.loads(model.config)
+        except json.JSONDecodeError:
+            logger.warning("Model %s has invalid config JSON; ignoring.", model_id)
+            stored_config = {}
+
+    build_name = stored_config.get("build_name")
+    if not build_name:
+        active_build = (
+            db.query(CandleBuild)
+            .filter(CandleBuild.is_active.is_(True))
+            .order_by(CandleBuild.created_at.desc())
+            .first()
+        )
+        if active_build:
+            build_name = active_build.name
+
     runtime_config: Dict[str, Any] = {
         "weights_path": stored_config.get("weights_path", model.file_path),
         "host": stored_config.get("host", "0.0.0.0"),
@@ -509,11 +536,12 @@ async def start_model(
         "dtype": stored_config.get("dtype"),
         "isq": stored_config.get("isq"),
         "max_gen_tokens": stored_config.get("max_gen_tokens"),
-        "build_name": stored_config.get("build_name"),
+        "build_name": build_name,
         "features": stored_config.get("features", []),
         "extra_args": stored_config.get("extra_args", []),
         "env": stored_config.get("env", {}),
         "build_profile": stored_config.get("build_profile", "release"),
+        "binary_path": stored_config.get("binary_path"),
     }
 
     try:
@@ -531,7 +559,7 @@ async def start_model(
 
         running_instance = RunningInstance(
             model_id=model_id,
-            build_name=stored_config.get("build_name"),
+            build_name=build_name,
             port=runtime_result.get("port"),
             pid=runtime_result.get("pid"),
             endpoint=runtime_result.get("endpoint"),
