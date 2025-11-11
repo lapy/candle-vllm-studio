@@ -925,13 +925,15 @@ async def start_model(
     if port is None:
         port = candle_port_min
     elif not (candle_port_min <= port <= candle_port_max):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Port {port} is outside the allowed candle-vllm range "
-                f"({candle_port_min}-{candle_port_max})."
-            ),
+        logger.warning(
+            "Requested port %s outside allowed candle-vllm range %s-%s, "
+            "falling back to %s",
+            port,
+            candle_port_min,
+            candle_port_max,
+            candle_port_min,
         )
+        port = candle_port_min
     stored_config["port"] = port
 
     build_name = stored_config.get("build_name")
