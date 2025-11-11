@@ -3,7 +3,7 @@ import os
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 import psutil
@@ -110,13 +110,32 @@ class CandleRuntimeManager:
             env=env
         )
 
-        await self._wait_for_health(
-            port=port,
-            timeout=runtime_config.get("startup_timeout", 180),
-            health_endpoints=runtime_config.get(
-                "health_endpoints", ["/health", "/v1/models"]
+        try:
+            await self._wait_for_health(
+                port=port,
+                timeout=runtime_config.get("startup_timeout", 180),
+                health_endpoints=runtime_config.get(
+                    "health_endpoints", ["/v1/models"]
+                ),
+                process=process,
             )
-        )
+        except Exception as exc:
+            stdout_tail, stderr_tail, exit_code = await self._drain_process(process)
+            if stderr_tail:
+                logger.error(
+                    "candle-vllm startup stderr (exit=%s):\n%s",
+                    exit_code,
+                    stderr_tail,
+                )
+            if stdout_tail:
+                logger.debug(
+                    "candle-vllm startup stdout (exit=%s):\n%s",
+                    exit_code,
+                    stdout_tail,
+                )
+            raise RuntimeError(
+                f"candle-vllm failed to start (exit code {exit_code}): {exc}"
+            ) from exc
 
         log_task = self._loop.create_task(
             self._stream_logs(model_id, process, websocket_manager)
@@ -317,7 +336,9 @@ class CandleRuntimeManager:
         if block_size:
             cmd.extend(["--block-size", str(int(block_size))])
         model_name = config.get("model_name")
-        if model_name:
+        weights_file = config.get("weights_file")
+        weights_path = config.get("weights_path")
+        if model_name and not weights_file and not weights_path:
             cmd.extend(["--m", str(model_name)])
         if dtype:
             cmd.extend(["--dtype", str(dtype)])
@@ -452,16 +473,22 @@ class CandleRuntimeManager:
         self,
         port: int,
         timeout: int = 180,
-        health_endpoints: Optional[list] = None
+        health_endpoints: Optional[list] = None,
+        process: Optional[asyncio.subprocess.Process] = None,
     ) -> None:
         """Poll candle-vllm for readiness."""
-        endpoints = health_endpoints or ["/v1/models"]
+        endpoints = health_endpoints or ["/v1/models", "/health"]
         start = (self._loop.time() if hasattr(self._loop, "time") else asyncio.get_event_loop().time())
         async with httpx.AsyncClient() as client:
             while True:
                 elapsed = self._loop.time() - start
                 if elapsed > timeout:
                     raise TimeoutError(f"candle-vllm did not become ready within {timeout}s")
+
+                if process and process.returncode is not None:
+                    raise RuntimeError(
+                        f"candle-vllm exited early with code {process.returncode}"
+                    )
 
                 for endpoint in endpoints:
                     url = f"http://127.0.0.1:{port}{endpoint}"
@@ -475,6 +502,41 @@ class CandleRuntimeManager:
                         continue
 
                 await asyncio.sleep(1.0)
+
+    async def _drain_process(
+        self, process: asyncio.subprocess.Process
+    ) -> Tuple[str, str, Optional[int]]:
+        """Ensure subprocess termination and return tail of stdout/stderr."""
+        try:
+            if process.returncode is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+        stdout_bytes = b""
+        stderr_bytes = b""
+        try:
+            stdout_bytes, stderr_bytes = await process.communicate()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to collect candle-vllm output: %s", exc)
+
+        exit_code = process.returncode
+        stdout_tail = self._tail_output(stdout_bytes)
+        stderr_tail = self._tail_output(stderr_bytes)
+        return stdout_tail, stderr_tail, exit_code
+
+    @staticmethod
+    def _tail_output(data: bytes, max_lines: int = 40, max_chars: int = 4000) -> str:
+        text = data.decode("utf-8", errors="ignore").strip()
+        if not text:
+            return ""
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        result = "\n".join(lines).strip()
+        if len(result) > max_chars:
+            result = result[-max_chars:]
+        return result
 
     async def _stream_logs(self, model_id: int, process: asyncio.subprocess.Process,
                            websocket_manager):
