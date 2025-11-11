@@ -122,6 +122,29 @@ async def lifespan(app: FastAPI):
             logger.warning("Unified monitor update failed after state change: %s", exc)
 
     runtime_manager.set_state_listener(runtime_state_listener)
+
+    async def cleanup_stale_instances():
+        db = SessionLocal()
+        removed_instances = 0
+        try:
+            removed_instances = db.query(RunningInstance).delete()
+            db.query(Model).update({Model.is_active: False})
+            db.commit()
+            if removed_instances:
+                logger.info("Cleaned %s stale runtime records on startup", removed_instances)
+        except Exception as exc:
+            logger.error("Failed to clean stale runtime records: %s", exc)
+            db.rollback()
+        finally:
+            db.close()
+
+        if removed_instances:
+            try:
+                await unified_monitor._collect_and_send_unified_data()
+            except Exception as exc:
+                logger.warning("Unified monitor update failed during startup cleanup: %s", exc)
+
+    await cleanup_stale_instances()
     build_manager = CandleBuildManager(builds_dir=os.path.join(data_dir, "candle-builds"))
     app.state.candle_runtime_manager = runtime_manager
     app.state.candle_build_manager = build_manager
