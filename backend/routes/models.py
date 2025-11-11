@@ -24,6 +24,8 @@ from backend.huggingface import (
     get_huggingface_token,
     get_model_details,
     _extract_quantization,
+    extract_base_model_name,
+    extract_model_type,
     clear_search_cache,
 )
 from backend.smart_auto import SmartAutoConfig
@@ -314,25 +316,45 @@ async def download_model_task(huggingface_id: str, filename: str,
         else:
             file_path, file_size = await download_model(huggingface_id, filename)
         
-        # Save to database
+        # Save to database - use generalized extraction functions
         quantization = _extract_quantization(filename)
+        base_model = extract_base_model_name(filename, huggingface_id)
+        model_type = extract_model_type(filename, huggingface_id)
+        
+        # Determine name based on file type
+        if filename.lower().endswith('.safetensors'):
+            # For safetensors, use base model name (not the shard filename)
+            model_name = base_model
+        else:
+            # For GGUF, strip extension
+            model_name = filename.replace(".gguf", "")
+        
         model = Model(
-            name=filename.replace(".gguf", ""),
+            name=model_name,
             huggingface_id=huggingface_id,
-            base_model_name=extract_base_model_name(filename),
+            base_model_name=base_model,
             file_path=file_path,
             file_size=file_size,
             quantization=quantization,
-            model_type=extract_model_type(filename),
+            model_type=model_type,
             runtime_alias=generate_runtime_alias(huggingface_id, quantization),
             downloaded_at=datetime.utcnow()
         )
-        weights_dir = os.path.dirname(file_path) if os.path.isfile(file_path) else file_path
+        # Determine weights configuration based on file type
+        if filename.lower().endswith('.safetensors'):
+            # For safetensors, use the directory containing the file(s)
+            weights_dir = os.path.dirname(file_path) if os.path.isfile(file_path) else file_path
+            weights_file = None  # Don't specify individual file, let candle-vllm find all shards
+        else:
+            # For GGUF, use specific file
+            weights_dir = os.path.dirname(file_path) if os.path.isfile(file_path) else file_path
+            weights_file = file_path if os.path.isfile(file_path) else None
+        
         model.config = {
             "host": "0.0.0.0",
             "port": 41234,
             "weights_path": weights_dir,
-            "weights_file": file_path if os.path.isfile(file_path) else None,
+            "weights_file": weights_file,
             "kvcache_mem_gpu": 4096,
             "kvcache_mem_cpu": None,
             "max_num_seqs": None,
@@ -400,46 +422,7 @@ async def download_model_task(huggingface_id: str, filename: str,
         db.close()
 
 
-# Removed duplicate extract_quantization; use `_extract_quantization` from backend.huggingface
-
-
-def extract_model_type(filename: str) -> str:
-    """Extract model type from filename"""
-    filename_lower = filename.lower()
-    if "llama" in filename_lower:
-        return "llama"
-    elif "mistral" in filename_lower:
-        return "mistral"
-    elif "codellama" in filename_lower:
-        return "codellama"
-    elif "gemma" in filename_lower:
-        return "gemma"
-    return "unknown"
-
-
-def extract_base_model_name(filename: str) -> str:
-    """Extract base model name from filename by removing quantization"""
-    import re
-    
-    # Remove file extension
-    name = filename.replace('.gguf', '')
-    
-    # Remove quantization patterns
-    quantization_patterns = [
-        r'IQ\d+_[A-Z]+',  # IQ1_S, IQ2_M, etc.
-        r'Q\d+_K_[A-Z]+',  # Q4_K_M, Q8_0, etc.
-        r'Q\d+_[A-Z]+',   # Q4_0, Q5_1, etc.
-        r'Q\d+[K_]?[A-Z]*',  # Q2_K, Q6_K, etc.
-        r'Q\d+',  # Q4, Q8, etc.
-    ]
-    
-    for pattern in quantization_patterns:
-        name = re.sub(pattern, '', name)
-    
-    # Clean up any trailing underscores or dots
-    name = name.rstrip('._')
-    
-    return name if name else filename
+# All extraction functions now imported from backend.huggingface for consistency
 
 
 @router.get("/{model_id}/config")

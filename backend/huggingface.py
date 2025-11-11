@@ -363,11 +363,105 @@ def _extract_model_metadata(model) -> Dict:
 
 
 def _extract_quantization(filename: str) -> str:
-    """Extract quantization from filename using compiled regex patterns"""
+    """Extract quantization from filename using compiled regex patterns.
+    Works for GGUF files. Returns 'safetensors' for .safetensors files."""
+    if filename.lower().endswith('.safetensors'):
+        return "safetensors"
+    
     for pattern in QUANTIZATION_PATTERNS:
         match = pattern.search(filename)
         if match:
             return match.group()
+    return "unknown"
+
+
+def extract_base_model_name(filename: str, huggingface_id: str = None) -> str:
+    """Extract base model name from filename or HuggingFace ID.
+    Works for both GGUF and safetensors files.
+    
+    Args:
+        filename: The filename (e.g., 'Qwen3-8B-Q4_K_M.gguf' or 'model-00001-of-00002.safetensors')
+        huggingface_id: Optional HuggingFace repo ID (e.g., 'Qwen/Qwen3-8B')
+    
+    Returns:
+        Base model name without quantization or shard indicators
+    """
+    import re
+    
+    # For safetensors, prefer using the HuggingFace ID if available
+    if filename.lower().endswith('.safetensors') and huggingface_id:
+        # Use the model name from the repo ID
+        parts = huggingface_id.split('/')
+        return parts[-1] if parts else filename
+    
+    # Remove file extension
+    name = filename.replace('.gguf', '').replace('.safetensors', '')
+    
+    # Remove shard indicators for safetensors (e.g., '-00001-of-00002', 'model-00001', etc.)
+    name = re.sub(r'-\d{5}(-of-\d{5})?$', '', name)
+    name = re.sub(r'\.model\.\d+$', '', name)
+    
+    # Remove quantization patterns (for GGUF)
+    quantization_patterns = [
+        r'IQ\d+_[A-Z]+',  # IQ1_S, IQ2_M, etc.
+        r'Q\d+_K_[A-Z]+',  # Q4_K_M, Q8_0, etc.
+        r'Q\d+_[A-Z]+',   # Q4_0, Q5_1, etc.
+        r'Q\d+[K_]?[A-Z]*',  # Q2_K, Q6_K, etc.
+        r'Q\d+',  # Q4, Q8, etc.
+    ]
+    
+    for pattern in quantization_patterns:
+        name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+    
+    # Clean up any trailing underscores, dots, or hyphens
+    name = name.rstrip('._-')
+    
+    # If name is empty or too short, fall back to HuggingFace ID or original filename
+    if not name or len(name) < 2:
+        if huggingface_id:
+            parts = huggingface_id.split('/')
+            return parts[-1] if parts else filename
+        return filename.replace('.gguf', '').replace('.safetensors', '')
+    
+    return name
+
+
+def extract_model_type(filename: str, huggingface_id: str = None) -> str:
+    """Extract model type/architecture from filename or HuggingFace ID.
+    Works for both GGUF and safetensors files.
+    
+    Args:
+        filename: The filename
+        huggingface_id: Optional HuggingFace repo ID for better detection
+    
+    Returns:
+        Model type (e.g., 'llama', 'mistral', 'qwen', etc.)
+    """
+    # Combine filename and HuggingFace ID for better detection
+    search_text = filename.lower()
+    if huggingface_id:
+        search_text += " " + huggingface_id.lower()
+    
+    # Check for common model types
+    if "llama" in search_text or "llama-" in search_text:
+        return "llama"
+    elif "mistral" in search_text:
+        return "mistral"
+    elif "qwen" in search_text or "qwq" in search_text:
+        return "qwen"
+    elif "codellama" in search_text:
+        return "codellama"
+    elif "gemma" in search_text:
+        return "gemma"
+    elif "phi" in search_text:
+        return "phi"
+    elif "yi" in search_text:
+        return "yi"
+    elif "deepseek" in search_text:
+        return "deepseek"
+    elif "stablelm" in search_text:
+        return "stablelm"
+    
     return "unknown"
 
 
