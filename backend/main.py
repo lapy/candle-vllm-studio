@@ -1,6 +1,8 @@
 import os
+import tempfile
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -24,31 +26,61 @@ logger = get_logger(__name__)
 
 
 def ensure_data_directories():
-    """Ensure data directories exist and are writable."""
-    base_dir = os.getenv("CANDLE_STUDIO_DATA", "/app/data")
+    """Ensure data directories exist and are writable, with fallbacks."""
+    preferred = os.getenv("CANDLE_STUDIO_DATA")
+    candidate_dirs = [
+        preferred,
+        "/app/data",
+        "/data/candle-studio",
+        str(Path.home() / ".local/share/candle-studio"),
+        str(Path.home() / ".candle-studio"),
+        os.path.join(tempfile.gettempdir(), "candle-studio"),
+    ]
+
     subdirs = ["models", "configs", "logs", "candle-builds"]
 
-    try:
-        os.makedirs(base_dir, exist_ok=True)
-        for subdir in subdirs:
-            os.makedirs(os.path.join(base_dir, subdir), exist_ok=True)
+    errors = []
+    for candidate in candidate_dirs:
+        if not candidate:
+            continue
+        base_path = Path(candidate).expanduser()
+        try:
+            base_path.mkdir(parents=True, exist_ok=True)
+            for subdir in subdirs:
+                (base_path / subdir).mkdir(parents=True, exist_ok=True)
 
-        test_file = os.path.join(base_dir, ".write_test")
-        with open(test_file, "w", encoding="utf-8") as handle:
-            handle.write("test")
-        os.remove(test_file)
-        logger.info("Verified data directory '%s' is writable", base_dir)
-    except PermissionError as exc:
-        logger.error("Data directory '%s' is not writable: %s", base_dir, exc)
-        raise
-    except Exception as exc:
-        logger.error("Failed to ensure data directories: %s", exc)
-        raise
+            test_file = base_path / ".write_test"
+            with open(test_file, "w", encoding="utf-8") as handle:
+                handle.write("test")
+            test_file.unlink(missing_ok=True)
+
+            os.environ["CANDLE_STUDIO_DATA"] = str(base_path)
+            logger.info("Using data directory '%s'", base_path)
+            return str(base_path)
+        except PermissionError as exc:
+            logger.warning(
+                "Data directory candidate '%s' is not writable: %s", base_path, exc
+            )
+            errors.append(f"{base_path}: {exc}")
+        except OSError as exc:
+            logger.warning(
+                "Failed to initialise data directory candidate '%s': %s", base_path, exc
+            )
+            errors.append(f"{base_path}: {exc}")
+
+    error_message = (
+        "Failed to locate a writable data directory. "
+        f"Tried: {', '.join(candidate for candidate in candidate_dirs if candidate)}. "
+        f"Errors: {errors}"
+    )
+    logger.error(error_message)
+    raise RuntimeError(error_message)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ensure_data_directories()
+    data_dir = ensure_data_directories()
+    app.state.data_dir = data_dir
     await init_db()
 
     huggingface_api_key = os.getenv("HUGGINGFACE_API_KEY")
@@ -57,7 +89,7 @@ async def lifespan(app: FastAPI):
         logger.info("HuggingFace API key loaded from environment variable")
 
     runtime_manager = CandleRuntimeManager()
-    build_manager = CandleBuildManager()
+    build_manager = CandleBuildManager(builds_dir=os.path.join(data_dir, "candle-builds"))
     app.state.candle_runtime_manager = runtime_manager
     app.state.candle_build_manager = build_manager
 

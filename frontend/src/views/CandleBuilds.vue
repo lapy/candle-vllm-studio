@@ -296,7 +296,7 @@ const form = reactive({
   enableNccl: false,
   enableFlashAttention: false,
   enableGraph: false,
-  enableMarlin: true,
+  enableMarlin: false,
   cudaArchitectures: '',
   customFeatures: '',
   customRustflags: '',
@@ -325,7 +325,6 @@ const handleCudaToggle = () => {
     form.enableMarlin = false
   } else {
     form.enableMetal = false
-    form.enableMarlin = true
   }
 }
 

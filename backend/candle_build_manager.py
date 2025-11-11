@@ -1,6 +1,8 @@
 import asyncio
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +28,7 @@ class CandleBuildConfig:
     enable_nccl: bool = False
     enable_flash_attention: bool = False
     enable_graph: bool = False
-    enable_marlin: bool = True
+    enable_marlin: bool = False
     cuda_architectures: str = ""
     custom_features: List[str] = field(default_factory=list)
     custom_rustflags: str = ""
@@ -96,7 +98,10 @@ async def detect_cuda_architectures() -> Optional[str]:
 class CandleBuildManager:
     """Clone, build, and manage candle-vllm binaries."""
 
-    def __init__(self, builds_dir: str = "data/candle-builds"):
+    def __init__(self, builds_dir: Optional[str] = None):
+        if builds_dir is None:
+            base_dir = os.getenv("CANDLE_STUDIO_DATA", os.path.join(os.getcwd(), "data"))
+            builds_dir = os.path.join(base_dir, "candle-builds")
         self._builds_dir = Path(builds_dir)
         self._builds_dir.mkdir(parents=True, exist_ok=True)
         # Ensure we have a writable cargo home when running as non-root
@@ -270,7 +275,97 @@ class CandleBuildManager:
             env["RUSTFLAGS"] = config.custom_rustflags
         if config.enable_cuda and config.cuda_architectures:
             env["CUDA_COMPUTE_CAP"] = config.cuda_architectures
+        if config.enable_cuda:
+            self._ensure_supported_cuda_version(env)
         return env
+
+    def _ensure_supported_cuda_version(self, env: Dict[str, str]) -> None:
+        """Work around cudarc's strict CUDA version whitelist."""
+        supported_versions = [
+            "11.8",
+            "12.0",
+            "12.1",
+            "12.2",
+            "12.3",
+            "12.4",
+            "12.5",
+            "12.6",
+            "12.8",
+        ]
+        preferred = env.get("CUDARC_FORCE_CUDA_VERSION") or env.get("CUDA_VERSION")
+        detected = preferred or self._detect_cuda_toolkit_version()
+        if not detected:
+            logger.info("CUDA version could not be detected; proceeding without override.")
+            return
+
+        if detected in supported_versions:
+            env.setdefault("CUDA_VERSION", detected)
+            env.setdefault("CUDARC_FORCE_CUDA_VERSION", detected)
+            return
+
+        # Find the closest lower supported version as a compatibility fallback.
+        try:
+            major_minor = tuple(int(part) for part in detected.split(".")[:2])
+        except ValueError:
+            logger.warning("Unrecognised CUDA version string '%s'; using default fallback.", detected)
+            fallback = supported_versions[-1]
+        else:
+            fallback = supported_versions[0]
+            for version in supported_versions:
+                ver_tuple = tuple(int(part) for part in version.split("."))
+                if ver_tuple <= major_minor:
+                    fallback = version
+                else:
+                    break
+
+        logger.warning(
+            "CUDA toolkit version '%s' is not in cudarc's supported list; forcing '%s'. "
+            "Set CUDARC_FORCE_CUDA_VERSION to override.",
+            detected,
+            fallback,
+        )
+        env["CUDA_VERSION"] = fallback
+        env["CUDARC_FORCE_CUDA_VERSION"] = fallback
+
+    @staticmethod
+    def _detect_cuda_toolkit_version() -> Optional[str]:
+        # Check common environment hints first.
+        for var in ("CUDA_VERSION", "CUDA_TOOLKIT_VERSION"):
+            value = os.environ.get(var)
+            if value:
+                parsed = CandleBuildManager._parse_version(value)
+                if parsed:
+                    return parsed
+
+        # Fall back to nvcc.
+        nvcc_path = shutil.which("nvcc")
+        if not nvcc_path:
+            return None
+
+        try:
+            result = subprocess.run(
+                [nvcc_path, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                text=True,
+            )
+        except OSError:
+            return None
+
+        output = result.stdout or result.stderr
+        match = re.search(r"release\s+(\d+\.\d+)", output)
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _parse_version(raw: str) -> Optional[str]:
+        match = re.search(r"(\d+)\.(\d+)", raw)
+        if not match:
+            return None
+        major, minor = match.groups()
+        return f"{int(major)}.{int(minor)}"
 
     async def _run_with_progress(
         self,

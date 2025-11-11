@@ -1,5 +1,5 @@
 # Candle vLLM Studio container image
-ARG BASE_IMAGE=nvidia/cuda:12.9.1-devel-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:12.8.0-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive

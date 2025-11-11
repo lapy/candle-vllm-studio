@@ -35,6 +35,12 @@ def clear_search_cache():
 _last_request_time = 0
 _min_request_interval = 0.5  # Reduced to 0.5 seconds since we're making fewer calls
 
+
+def _data_path(*parts: str) -> str:
+    """Return a path inside the configured data directory."""
+    base_dir = os.getenv("CANDLE_STUDIO_DATA", os.path.join(os.getcwd(), "data"))
+    return os.path.join(base_dir, *parts)
+
 def _sanitize_filename(filename: str) -> str:
     """Ensure filename is a safe basename without path traversal.
     Raises ValueError if invalid.
@@ -369,7 +375,7 @@ async def get_model_details(model_id: str) -> Dict:
                 config_path = hf_hub_download(
                     repo_id=model_id,
                     filename='config.json',
-                    local_dir="data/temp",
+                    local_dir=_data_path("temp"),
                     local_dir_use_symlinks=False
                 )
                 
@@ -405,7 +411,7 @@ async def download_model(huggingface_id: str, filename: str) -> tuple[str, int]:
     """Download model from HuggingFace"""
     try:
         # Create models directory
-        models_dir = "data/models"
+        models_dir = _data_path("models")
         os.makedirs(models_dir, exist_ok=True)
         
         # Sanitize filename
@@ -444,7 +450,7 @@ async def download_model_with_websocket_progress(huggingface_id: str, filename: 
     logger.info(f"Active connections: {len(websocket_manager.active_connections)}")
     
     try:
-        models_dir = "data/models"
+        models_dir = _data_path("models")
         os.makedirs(models_dir, exist_ok=True)
         
         # Sanitize filename and build path

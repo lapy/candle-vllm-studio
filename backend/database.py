@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, String, create_engine, text
@@ -10,12 +11,39 @@ from backend.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-DATABASE_URL = "sqlite:///./data/db.sqlite"
-
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 Base = declarative_base()
+
+_engine = None
+_session_factory = None
+
+
+def resolve_data_dir() -> str:
+    """Return the configured data directory (without creating it)."""
+    return os.getenv("CANDLE_STUDIO_DATA", os.path.join(os.getcwd(), "data"))
+
+
+def _ensure_session_factory():
+    global _engine, _session_factory
+    if _session_factory is None:
+        data_dir = Path(resolve_data_dir())
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "db.sqlite"
+        database_url = f"sqlite:///{db_path}"
+        _engine = create_engine(database_url, connect_args={"check_same_thread": False})
+        _session_factory = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+        logger.info("Database engine initialised at %s", db_path)
+    return _session_factory
+
+
+def get_engine():
+    _ensure_session_factory()
+    return _engine
+
+
+def SessionLocal():
+    """Return a new SQLAlchemy session."""
+    factory = _ensure_session_factory()
+    return factory()
 
 
 def get_db():
@@ -100,15 +128,16 @@ def sync_model_active_status(db):
 
 async def init_db():
     """Initialise database tables and run lightweight migrations."""
-    os.makedirs("data", exist_ok=True)
-    Base.metadata.create_all(bind=engine)
+    data_dir = Path(resolve_data_dir())
+    data_dir.mkdir(parents=True, exist_ok=True)
+    Base.metadata.create_all(bind=get_engine())
     _ensure_schema_evolution()
     migrate_existing_models()
 
 
 def _ensure_schema_evolution() -> None:
     """Ensure new columns exist on legacy SQLite databases."""
-    with engine.begin() as conn:
+    with get_engine().begin() as conn:
         def column_missing(table: str, column: str) -> bool:
             result = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
             return column not in {row[1] for row in result}
