@@ -12,7 +12,7 @@ candle-vllm \
   --w /path/to/weights \      # weights_path (REQUIRED)
   --host 0.0.0.0 \             # host
   --p 41234 \                  # port (REQUIRED)
-  --mem 4 \                    # kvcache_mem_gpu (GB)
+  --mem 4096 \                 # kvcache_mem_gpu (MB)
   --dtype f16 \                # Runtime dtype (f16, bf16, f32, or null for auto)
   --isq q6k \                  # In-situ quantization
   --max-gen-tokens 4096 \      # Maximum generated tokens

@@ -15,7 +15,7 @@ except ImportError:
 import subprocess
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 
 from backend.logging_config import get_logger
 
@@ -25,6 +25,197 @@ logger = get_logger(__name__)
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+def _decode_bus_id(bus_id: Any) -> str:
+    if isinstance(bus_id, bytes):
+        return bus_id.decode("utf-8").strip().lower()
+    return str(bus_id).strip().lower()
+
+
+def _topology_level_to_str(level: int) -> str:
+    if pynvml is None:
+        return "unknown"
+    mapping = {
+        getattr(pynvml, "NVML_TOPOLOGY_INTERNAL", None): "internal",
+        getattr(pynvml, "NVML_TOPOLOGY_SINGLE", None): "single",
+        getattr(pynvml, "NVML_TOPOLOGY_MULTIPLE", None): "multiple",
+        getattr(pynvml, "NVML_TOPOLOGY_HOSTBRIDGE", None): "hostbridge",
+        getattr(pynvml, "NVML_TOPOLOGY_NODE", None): "node",
+        getattr(pynvml, "NVML_TOPOLOGY_SYSTEM", None): "system",
+    }
+    return mapping.get(level, "unknown")
+
+
+def _collect_cpu_affinity(handle) -> Dict[str, Any]:
+    info: Dict[str, Any] = {"cpus": [], "numa_node": None}
+    if pynvml is None or not hasattr(pynvml, "nvmlDeviceGetCpuAffinity"):
+        return info
+    try:
+        cpu_mask = pynvml.nvmlDeviceGetCpuAffinity(handle, 1)
+        cpus: List[int] = []
+        for idx, mask in enumerate(cpu_mask):
+            for bit in range(64):
+                if mask & (1 << bit):
+                    cpus.append(idx * 64 + bit)
+        info["cpus"] = cpus
+        if cpus:
+            # NUMA node heuristic: CPU id // (cpus per node) is expensive; expose first CPU
+            info["numa_node"] = cpus[0] // max(1, os.cpu_count() or 1)
+    except Exception:
+        pass
+    return info
+
+
+def _gather_nvlink_links(handles: List[Any]) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, List[int]]]:
+    nvlink_info: Dict[int, List[Dict[str, Any]]] = {}
+    adjacency: Dict[int, List[int]] = {}
+
+    if pynvml is None or not hasattr(pynvml, "NVML_NVLINK_MAX_LINKS"):
+        return nvlink_info, adjacency
+
+    pci_map: Dict[str, int] = {}
+    for idx, handle in enumerate(handles):
+        try:
+            pci = pynvml.nvmlDeviceGetPciInfo(handle)
+            pci_map[_decode_bus_id(pci.busId)] = idx
+        except Exception:
+            continue
+
+    for idx, handle in enumerate(handles):
+        nvlink_info[idx] = []
+        adjacency[idx] = []
+        max_links = getattr(pynvml, "NVML_NVLINK_MAX_LINKS", 0)
+        for link_id in range(max_links):
+            try:
+                if not pynvml.nvmlDeviceGetNvLinkState(handle, link_id):
+                    continue
+            except Exception:
+                continue
+            try:
+                remote_pci = pynvml.nvmlDeviceGetNvLinkRemotePciInfo(handle, link_id)
+            except Exception:
+                continue
+
+            remote_index = pci_map.get(_decode_bus_id(remote_pci.busId))
+            if remote_index is None:
+                continue
+
+            link_entry: Dict[str, Any] = {"peer": remote_index, "link_id": link_id}
+            try:
+                version = pynvml.nvmlDeviceGetNvLinkVersion(handle, link_id)
+                link_entry["version"] = version
+            except Exception:
+                link_entry["version"] = None
+
+            try:
+                speed = pynvml.nvmlDeviceGetNvLinkSpeed(handle, link_id)
+                link_entry["speed_gbps"] = speed
+            except Exception:
+                link_entry["speed_gbps"] = None
+
+            try:
+                cap = pynvml.nvmlDeviceGetNvLinkCapability(
+                    handle, link_id, getattr(pynvml, "NVML_NVLINK_CAP_P2P_SUPPORTED", 0)
+                )
+                link_entry["p2p_supported"] = bool(cap)
+            except Exception:
+                link_entry["p2p_supported"] = None
+
+            nvlink_info[idx].append(link_entry)
+            adjacency[idx].append(remote_index)
+
+    return nvlink_info, adjacency
+
+
+def _discover_nvml_topology(handles: List[Any]) -> Dict[str, Any]:
+    topology: Dict[str, Any] = {"ancestor_matrix": {}, "nvlink_clusters": [], "mixed_topology": False}
+    if pynvml is None:
+        return topology
+
+    device_count = len(handles)
+    nvlink_edges, nvlink_adj = _gather_nvlink_links(handles)
+    ancestor_matrix: Dict[str, Dict[str, str]] = {}
+
+    for i, handle_i in enumerate(handles):
+        row: Dict[str, str] = {}
+        for j, handle_j in enumerate(handles):
+            if i == j:
+                row[str(j)] = "self"
+                continue
+            try:
+                ancestor = pynvml.nvmlDeviceGetTopologyCommonAncestor(handle_i, handle_j)
+                row[str(j)] = _topology_level_to_str(ancestor)
+            except Exception:
+                row[str(j)] = "unknown"
+        ancestor_matrix[str(i)] = row
+
+    visited: set[int] = set()
+    clusters: List[List[int]] = []
+    for node in range(device_count):
+        if node in visited:
+            continue
+        stack = [node]
+        cluster: List[int] = []
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            cluster.append(current)
+            for neighbor in nvlink_adj.get(current, []):
+                if neighbor not in visited:
+                    stack.append(neighbor)
+        if len(cluster) > 1:
+            clusters.append(sorted(cluster))
+
+    isolated = [idx for idx in range(device_count) if not nvlink_adj.get(idx)]
+    topology["ancestor_matrix"] = ancestor_matrix
+    topology["nvlink_edges"] = nvlink_edges
+    topology["nvlink_clusters"] = clusters
+    topology["isolated_gpus"] = isolated
+    topology["mixed_topology"] = bool(clusters) and bool(isolated)
+    return topology
+
+
+def _parse_nvidia_smi_topology() -> Optional[Dict[str, Any]]:
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "topo", "-m"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    header_tokens = lines[0].split()
+    gpu_labels = [token for token in header_tokens if token.startswith("GPU")]
+
+    matrix: Dict[str, Dict[str, str]] = {}
+    cpu_affinity: Dict[str, str] = {}
+
+    for line in lines[1:]:
+        tokens = line.split()
+        if not tokens:
+            continue
+        row_label = tokens[0]
+        if row_label.startswith("GPU"):
+            matrix[row_label] = {}
+            for col_label, value in zip(header_tokens[1:], tokens[1:]):
+                if col_label.startswith("GPU"):
+                    matrix[row_label][col_label] = value
+                elif col_label.upper().startswith("CPU"):
+                    cpu_affinity[row_label] = value
+
+    return {
+        "matrix": matrix,
+        "gpu_labels": gpu_labels,
+        "cpu_affinity": cpu_affinity,
+    }
 
 def _check_vulkan_drivers() -> bool:
     """Check if Vulkan drivers are installed"""
@@ -139,6 +330,30 @@ async def detect_nvidia_gpu() -> Optional[Dict]:
             except:
                 gpu_util = None
                 memory_util = None
+
+            pci_info = {}
+            bus_id = None
+            try:
+                pci = pynvml.nvmlDeviceGetPciInfo(handle)
+                bus_id = _decode_bus_id(pci.busId)
+                pci_info = {
+                    "bus_id": bus_id,
+                    "domain": getattr(pci, "domain", None),
+                    "bus": getattr(pci, "bus", None),
+                    "device": getattr(pci, "device", None),
+                }
+            except Exception:
+                pci_info = {}
+
+            pcie_info = {}
+            try:
+                gen = pynvml.nvmlDeviceGetMaxPcieLinkGeneration(handle)
+                width = pynvml.nvmlDeviceGetMaxPcieLinkWidth(handle)
+                pcie_info = {"max_generation": gen, "max_link_width": width}
+            except Exception:
+                pcie_info = {}
+
+            affinity_info = _collect_cpu_affinity(handle)
             
             gpu_info = {
                 "index": i,
@@ -153,11 +368,26 @@ async def detect_nvidia_gpu() -> Optional[Dict]:
                 "utilization": {
                     "gpu": gpu_util,
                     "memory": memory_util
-                }
+                },
+                "pci": pci_info,
+                "pcie": pcie_info,
+                "topology": {
+                    "numa_node": affinity_info.get("numa_node"),
+                    "cpu_affinity": affinity_info.get("cpus", []),
+                    "nvlink_links": [],
+                },
             }
             
             gpus.append(gpu_info)
         
+        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(device_count)]
+        topology_info = _discover_nvml_topology(handles)
+
+        nvlink_edges = topology_info.get("nvlink_edges", {})
+        for gpu in gpus:
+            gpu_index = gpu["index"]
+            gpu["topology"]["nvlink_links"] = nvlink_edges.get(gpu_index, [])
+
         # Get CUDA version
         try:
             cuda_version = pynvml.nvmlSystemGetCudaDriverVersion()
@@ -172,7 +402,8 @@ async def detect_nvidia_gpu() -> Optional[Dict]:
             "gpus": gpus,
             "total_vram": sum(gpu["memory"]["total"] for gpu in gpus),
             "available_vram": sum(gpu["memory"]["free"] for gpu in gpus),
-            "cpu_only_mode": device_count == 0
+            "cpu_only_mode": device_count == 0,
+            "topology": topology_info,
         }
         
     except Exception as exc:
@@ -270,7 +501,8 @@ async def _detect_nvidia_via_smi(cuda_version_hint: Optional[str] = None) -> Opt
             "gpus": gpus,
             "total_vram": sum(gpu["memory"]["total"] for gpu in gpus),
             "available_vram": sum(gpu["memory"]["free"] for gpu in gpus),
-            "cpu_only_mode": len(gpus) == 0
+            "cpu_only_mode": len(gpus) == 0,
+            "topology": _parse_nvidia_smi_topology(),
         }
 
     except (subprocess.CalledProcessError, FileNotFoundError):

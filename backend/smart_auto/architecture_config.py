@@ -39,6 +39,8 @@ def resolve_architecture(architecture_or_name: str) -> str:
     # Llama architectures (CodeLlama before other Llama variants)
     if "codellama" in text:
         return "codellama"
+    if "llama3.1" in text or "llama-3.1" in text or "llama-3-1" in text:
+        return "llama31"
     if "llama3" in text or "llama-3" in text:
         return "llama3"
     if "llama2" in text or "llama-2" in text:
@@ -55,6 +57,8 @@ def resolve_architecture(architecture_or_name: str) -> str:
     # GLM architectures
     if "glm-4" in text or "glm4" in text:
         return "glm4"
+    if "glm-3" in text or "glm3" in text:
+        return "glm3"
     if "glm" in text or "chatglm" in text:
         return "glm"
     
@@ -68,7 +72,13 @@ def resolve_architecture(architecture_or_name: str) -> str:
     if "mistral" in text:
         return "mistral"
     if "phi" in text:
+        if "phi3" in text or "phi-3" in text:
+            return "phi3"
         return "phi"
+    if "mixtral" in text:
+        return "mixtral"
+    if "mamba" in text:
+        return "mamba"
     
     # If text contains something but not recognized, return as generic for model names
     # or unknown for invalid architecture strings

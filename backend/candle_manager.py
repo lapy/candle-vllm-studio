@@ -246,12 +246,36 @@ class CandleRuntimeManager:
         host = config.get("host", "0.0.0.0")
         port = int(config["port"])
         weights_path = self._resolve_weights_directory(config)
+        weights_file = self._resolve_weights_file(config, weights_path)
         config["weights_path"] = str(weights_path)
+        config["weights_file"] = str(weights_file)
 
         dtype = config.get("dtype")
         isq = config.get("isq")
-        max_tokens = config.get("max_gen_tokens")
-        kv_mem_gb = config.get("kvcache_mem_gpu")
+        kv_mem_gpu_mb = self._normalise_mem_to_mb(config.get("kvcache_mem_gpu"))
+        kv_mem_cpu_mb = self._normalise_mem_to_mb(config.get("kvcache_mem_cpu"))
+        if kv_mem_gpu_mb is not None:
+            config["kvcache_mem_gpu"] = kv_mem_gpu_mb
+        if kv_mem_cpu_mb is not None:
+            config["kvcache_mem_cpu"] = kv_mem_cpu_mb
+        max_num_seqs = config.get("max_num_seqs")
+        block_size = config.get("block_size")
+        hf_token = config.get("hf_token")
+        hf_token_path = config.get("hf_token_path")
+        verbose = bool(config.get("verbose"))
+        cpu_flag = bool(config.get("cpu"))
+        record_conversation = bool(config.get("record_conversation"))
+        holding_time = config.get("holding_time")
+        multithread = bool(config.get("multithread"))
+        log_flag = bool(config.get("log"))
+        temperature = config.get("temperature")
+        top_p = config.get("top_p")
+        min_p = config.get("min_p")
+        top_k = config.get("top_k")
+        frequency_penalty = config.get("frequency_penalty")
+        presence_penalty = config.get("presence_penalty")
+        prefill_chunk_size = config.get("prefill_chunk_size")
+        fp8_kvcache = bool(config.get("fp8_kvcache"))
         additional_args = config.get("extra_args", [])
         features = config.get("features", [])
         env_overrides = config.get("env", {})
@@ -273,17 +297,55 @@ class CandleRuntimeManager:
             workdir = self._repo_path
 
         cmd.extend(["--w", str(weights_path)])
-        cmd.extend(["--host", str(host)])
+        if weights_file:
+            cmd.extend(["--f", str(weights_file)])
+        cmd.extend(["--h", str(host)])
         cmd.extend(["--p", str(port)])
 
-        if kv_mem_gb:
-            cmd.extend(["--mem", str(kv_mem_gb)])
+        if hf_token:
+            cmd.extend(["--hf-token", str(hf_token)])
+        if hf_token_path:
+            cmd.extend(["--hf-token-path", str(hf_token_path)])
+        if verbose:
+            cmd.append("--verbose")
+        if kv_mem_gpu_mb:
+            cmd.extend(["--mem", str(kv_mem_gpu_mb)])
+        if kv_mem_cpu_mb:
+            cmd.extend(["--kvcache-mem-cpu", str(kv_mem_cpu_mb)])
+        if max_num_seqs:
+            cmd.extend(["--max-num-seqs", str(int(max_num_seqs))])
+        if block_size:
+            cmd.extend(["--block-size", str(int(block_size))])
         if dtype:
             cmd.extend(["--dtype", str(dtype)])
         if isq:
             cmd.extend(["--isq", str(isq)])
-        if max_tokens:
-            cmd.extend(["--max-gen-tokens", str(max_tokens)])
+        if cpu_flag:
+            cmd.append("--cpu")
+        if record_conversation:
+            cmd.append("--record-conversation")
+        if holding_time:
+            cmd.extend(["--holding-time", str(int(holding_time))])
+        if multithread:
+            cmd.append("--multithread")
+        if log_flag:
+            cmd.append("--log")
+        if temperature is not None:
+            cmd.extend(["--temperature", str(float(temperature))])
+        if top_p is not None:
+            cmd.extend(["--top-p", str(float(top_p))])
+        if min_p is not None:
+            cmd.extend(["--min-p", str(float(min_p))])
+        if top_k is not None:
+            cmd.extend(["--top-k", str(int(top_k))])
+        if frequency_penalty is not None:
+            cmd.extend(["--frequency-penalty", str(float(frequency_penalty))])
+        if presence_penalty is not None:
+            cmd.extend(["--presence-penalty", str(float(presence_penalty))])
+        if prefill_chunk_size:
+            cmd.extend(["--prefill-chunk-size", str(int(prefill_chunk_size))])
+        if fp8_kvcache:
+            cmd.append("--fp8-kvcache")
 
         device = config.get("device_id")
         if device is not None:
@@ -312,6 +374,41 @@ class CandleRuntimeManager:
             raise NotADirectoryError(f"Weights path must be a directory, got: {path}")
 
         return path
+
+    def _resolve_weights_file(self, config: Dict[str, Any], weights_dir: Path) -> Path:
+        """Resolve the GGUF weights file path for candle-vllm."""
+        raw_file = config.get("weights_file") or config.get("weights_filename")
+
+        if raw_file:
+            candidate = Path(str(raw_file)).expanduser()
+            if not candidate.is_absolute():
+                candidate = (weights_dir / candidate).resolve()
+
+            if not candidate.exists():
+                raise FileNotFoundError(f"Weights file not found at {candidate}")
+            if not candidate.is_file():
+                raise FileNotFoundError(f"Weights file path must be a file, got: {candidate}")
+            return candidate
+
+        gguf_files = sorted(p for p in weights_dir.glob("*.gguf") if p.is_file())
+        if not gguf_files:
+            raise FileNotFoundError(
+                f"No GGUF files found in weights directory {weights_dir}"
+            )
+        return gguf_files[0]
+
+    def _normalise_mem_to_mb(self, value: Any) -> Optional[int]:
+        if value in (None, "", 0, "0"):
+            return None
+        try:
+            mem_val = float(value)
+        except (TypeError, ValueError):
+            return None
+        if mem_val <= 0:
+            return None
+        if mem_val <= 64:
+            return int(mem_val * 1024)
+        return int(mem_val)
 
     def _resolve_binary_from_config(self, config: Dict[str, Any]) -> Optional[str]:
         """Resolve candle-vllm binary from runtime configuration or active builds."""

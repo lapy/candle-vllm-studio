@@ -155,7 +155,79 @@
                   </div>
                 </div>
               </div>
-              
+              <div class="smart-auto-controls">
+                <div class="control-row">
+                  <div class="control-label">
+                    <label for="smart-auto-speed">Speed vs Quality</label>
+                    <span class="control-hint">{{ smartAutoSpeedDescription }}</span>
+                  </div>
+                  <Slider
+                    id="smart-auto-speed"
+                    v-model="smartAutoSpeedQuality"
+                    :min="0"
+                    :max="100"
+                    :step="1"
+                    aria-label="Speed quality balance slider"
+                  />
+                </div>
+
+                <div class="control-row">
+                  <div class="control-label">
+                    <label for="smart-auto-usecase">Use Case</label>
+                    <span class="control-hint">{{ smartAutoUseCaseDescription }}</span>
+                  </div>
+                  <Dropdown
+                    id="smart-auto-usecase"
+                    v-model="smartAutoUseCase"
+                    :options="smartAutoUseCaseOptions"
+                    optionLabel="label"
+                    optionValue="value"
+                    placeholder="Select use case"
+                    class="smart-auto-usecase"
+                  />
+                </div>
+
+                <div class="control-grid">
+                  <div class="control-field">
+                    <label for="smart-auto-concurrency">
+                      Target Concurrency
+                      <small>(optional)</small>
+                    </label>
+                    <InputNumber
+                      id="smart-auto-concurrency"
+                      v-model="smartAutoTargetConcurrency"
+                      :min="1"
+                      :max="16"
+                      :useGrouping="false"
+                      placeholder="Auto"
+                    />
+                  </div>
+                  <div class="control-field">
+                    <label for="smart-auto-max-tokens">
+                      Max Tokens Hint
+                      <small>(optional)</small>
+                    </label>
+                    <InputNumber
+                      id="smart-auto-max-tokens"
+                      v-model="smartAutoMaxTokensHint"
+                      :min="256"
+                      :step="64"
+                      :useGrouping="false"
+                      placeholder="Auto"
+                    />
+                  </div>
+                </div>
+
+                <div class="control-row debug-toggle">
+                  <Checkbox v-model="smartAutoIncludeDebug" inputId="smart-auto-debug" binary />
+                  <label for="smart-auto-debug">Include decision rationale in preview</label>
+                </div>
+                <div class="control-row debug-toggle">
+                  <Checkbox v-model="smartAutoRestrictNvlink" inputId="smart-auto-nvlink" binary />
+                  <label for="smart-auto-nvlink">Restrict to NVLink groups when available</label>
+                </div>
+              </div>
+
               <Button 
                 label="Generate Optimal Config" 
                 icon="pi pi-bolt" 
@@ -225,6 +297,94 @@
               <p>Candle-vLLM starts an OpenAI-compatible server. Generation parameters (temperature, top-k, sampling, etc.) are configured per-request via the API, not at startup. This UI configures the runtime server settings only.</p>
             </div>
           </div>
+          <div v-if="topologyPlan?.global" class="topology-summary-card">
+            <div class="topology-summary-header">
+              <div>
+                <h4>Topology Plan</h4>
+                <p>
+                  {{ topologyPlan.global.tp_strategy === 'tensor_parallel' ? 'Tensor Parallel' : 'Replica Execution' }}
+                  ·
+                  {{ topologyPlan.global.mixed_topology ? 'Mixed NVLink/PCIe' : 'Homogeneous Topology' }}
+                  <template v-if="topologyPlan.global.restrict_to_nvlink">
+                    · NVLink-only shards
+                  </template>
+                </p>
+              </div>
+              <div class="topology-summary-metric">
+                <span class="metric-label">KV Pool</span>
+                <span class="metric-value">{{ formatFileSize(topologyPlan.global.total_kv_pool_mb * 1024 * 1024) }}</span>
+              </div>
+            </div>
+            <div class="topology-summary-grid">
+              <div>
+                <span class="metric-label">Recommended Concurrency</span>
+                <span class="metric-value">{{ topologyPlan.global.recommended_max_num_seqs }}</span>
+              </div>
+              <div>
+                <span class="metric-label">Prefill Chunk Size</span>
+                <span class="metric-value">{{ topologyPlan.global.prefill_chunk_size }}</span>
+              </div>
+              <div>
+                <span class="metric-label">Block Size</span>
+                <span class="metric-value">{{ topologyPlan.global.block_size }}</span>
+              </div>
+              <div>
+                <span class="metric-label">FP8 KV Cache</span>
+                <span class="metric-value">{{ topologyPlan.global.fp8_enabled ? 'Enabled' : 'Disabled' }}</span>
+              </div>
+            </div>
+            <div v-if="topologyPlan.global.warnings?.length" class="topology-warnings">
+              <i class="pi pi-exclamation-triangle"></i>
+              <ul>
+                <li v-for="(warning, idx) in topologyPlan.global.warnings" :key="idx">{{ warning }}</li>
+              </ul>
+            </div>
+            <div class="topology-groups">
+              <div
+                v-for="(group, groupIndex) in topologyPlan.groups"
+                :key="group.id || groupIndex"
+                class="topology-group-card"
+              >
+                <div class="group-header">
+                  <div>
+                    <h5>Group {{ groupIndex + 1 }} · {{ group.link_type === 'nvlink' ? 'NVLink' : 'PCIe' }}</h5>
+                    <p>TP Degree: {{ group.tp_degree }} · KV Pool: {{ formatFileSize(group.kv_pool_mb * 1024 * 1024) }}</p>
+                  </div>
+                  <div v-if="group.expected_penalty_pct" class="group-penalty">
+                    Penalty ~{{ group.expected_penalty_pct }}%
+                  </div>
+                </div>
+                <table class="group-device-table">
+                  <thead>
+                    <tr>
+                      <th>GPU</th>
+                      <th>Weights</th>
+                      <th>Activations</th>
+                      <th>KV Cache</th>
+                      <th>Safety Margin</th>
+                      <th>FP8</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="device in group.devices" :key="device.index">
+                      <td>GPU{{ device.index }}</td>
+                      <td>{{ formatFileSize(device.weights_mb * 1024 * 1024) }}</td>
+                      <td>{{ formatFileSize(device.activations_mb * 1024 * 1024) }}</td>
+                      <td>{{ formatFileSize(device.kv_budget_mb * 1024 * 1024) }}</td>
+                      <td>{{ formatFileSize(device.safety_margin_mb * 1024 * 1024) }}</td>
+                      <td>{{ device.supports_fp8 ? 'Yes' : 'No' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-if="group.warnings?.length" class="topology-warnings group-warnings">
+                  <i class="pi pi-exclamation-circle"></i>
+                  <ul>
+                    <li v-for="(warning, idx) in group.warnings" :key="idx">{{ warning }}</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
           <TabView v-model:activeIndex="activeTabIndex" :scrollable="true" class="config-tabs">
           <!-- Essential Settings Tab -->
           <TabPanel header="Server" icon="pi pi-server">
@@ -259,6 +419,11 @@
                     <InputText v-model="config.weights_path" placeholder="e.g. /app/data/models/my-model" readonly disabled />
                   </template>
                 </ConfigField>
+                <ConfigField label="Weights File" help-text="GGUF file used when launching candle-vllm (read-only).">
+                  <template #input>
+                    <InputText v-model="config.weights_file" placeholder="e.g. /app/data/models/my-model/model.gguf" readonly disabled />
+                  </template>
+                </ConfigField>
                 <ConfigField label="Host" help-text="Server bind address (default: 0.0.0.0)">
                   <template #input>
                     <InputText v-model="config.host" placeholder="0.0.0.0" />
@@ -285,9 +450,14 @@
                   <i class="pi pi-sliders-h"></i>
                   Model Parameters
                 </h4>
-                <ConfigField label="KV Cache GPU Memory (GB)" help-text="GPU memory for KV cache (--mem parameter)">
+                <ConfigField label="KV Cache GPU Memory (MB)" help-text="GPU memory for KV cache (--mem parameter, e.g. 4096 = 4 GB)">
                   <template #input>
-                    <InputNumber v-model="config.kvcache_mem_gpu" :min="0" :max="64" :step="1" :useGrouping="false" />
+                    <InputNumber v-model="config.kvcache_mem_gpu" :min="0" :max="262144" :step="128" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="KV Cache CPU Memory (MB)" help-text="CPU fallback memory for KV cache (--kvcache-mem-cpu)">
+                  <template #input>
+                    <InputNumber v-model="config.kvcache_mem_cpu" :min="0" :max="1048576" :step="256" :useGrouping="false" />
                   </template>
                 </ConfigField>
                 <ConfigField label="Runtime DType" help-text="Model data type (--dtype parameter)">
@@ -305,6 +475,16 @@
                     <InputNumber v-model="config.max_gen_tokens" :min="16" :max="65536" :useGrouping="false" />
                   </template>
                 </ConfigField>
+                <ConfigField label="Max Concurrent Sequences" help-text="Maximum simultaneous sequences (--max-num-seqs, default 16)">
+                  <template #input>
+                    <InputNumber v-model="config.max_num_seqs" :min="1" :max="4096" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="KV Block Size" help-text="KV cache block size (--block-size, default 64)">
+                  <template #input>
+                    <InputNumber v-model="config.block_size" :min="16" :max="1024" :useGrouping="false" />
+                  </template>
+                </ConfigField>
                 <ConfigField label="Device ID" help-text="GPU device index (--d parameter, default: 0)">
                   <template #input>
                     <InputNumber v-model="config.device_id" :min="0" :max="15" :useGrouping="false" />
@@ -317,6 +497,104 @@
           <!-- Advanced Tab -->
           <TabPanel header="Advanced" icon="pi pi-cog">
             <div class="tab-content">
+              <div class="tab-section">
+                <h4 class="tab-section-title">
+                  <i class="pi pi-sliders-v"></i>
+                  Scheduler & Runtime Flags
+                </h4>
+                <ConfigField label="Force CPU Mode" help-text="Run entirely on CPU (--cpu)">
+                  <template #input>
+                    <Checkbox v-model="config.cpu" binary />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Record Conversations" help-text="Persist conversation transcripts (--record-conversation)">
+                  <template #input>
+                    <Checkbox v-model="config.record_conversation" binary />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Verbose Logging" help-text="Verbose request logging (--verbose)">
+                  <template #input>
+                    <Checkbox v-model="config.verbose" binary />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Structured Log Output" help-text="Print structured logs (--log)">
+                  <template #input>
+                    <Checkbox v-model="config.log" binary />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Multithreaded Scheduler" help-text="Enable multithreaded scheduling (--multithread)">
+                  <template #input>
+                    <Checkbox v-model="config.multithread" binary />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Holding Time (ms)" help-text="Max wait time to batch requests (--holding-time)">
+                  <template #input>
+                    <InputNumber v-model="config.holding_time" :min="0" :max="10000" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Prefill Chunk Size" help-text="Chunk size for prefill stage (--prefill-chunk-size)">
+                  <template #input>
+                    <InputNumber v-model="config.prefill_chunk_size" :min="0" :max="16384" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Enable FP8 KV Cache" help-text="Use FP8 cache format (--fp8-kvcache)">
+                  <template #input>
+                    <Checkbox v-model="config.fp8_kvcache" binary />
+                  </template>
+                </ConfigField>
+              </div>
+              <div class="tab-section">
+                <h4 class="tab-section-title">
+                  <i class="pi pi-chart-line"></i>
+                  Sampling Defaults
+                </h4>
+                <ConfigField label="Temperature" help-text="Default sampling temperature (--temperature)">
+                  <template #input>
+                    <InputNumber v-model="config.temperature" :min="0" :max="5" :step="0.05" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Top-P" help-text="Default nucleus sampling value (--top-p)">
+                  <template #input>
+                    <InputNumber v-model="config.top_p" :min="0" :max="1" :step="0.01" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Min-P" help-text="Minimum probability mass (--min-p)">
+                  <template #input>
+                    <InputNumber v-model="config.min_p" :min="0" :max="1" :step="0.01" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Top-K" help-text="Limit sampling to top-k tokens (--top-k)">
+                  <template #input>
+                    <InputNumber v-model="config.top_k" :min="0" :max="1000" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Frequency Penalty" help-text="Penalty for repeated tokens (--frequency-penalty)">
+                  <template #input>
+                    <InputNumber v-model="config.frequency_penalty" :min="-2" :max="2" :step="0.05" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Presence Penalty" help-text="Penalty for token presence (--presence-penalty)">
+                  <template #input>
+                    <InputNumber v-model="config.presence_penalty" :min="-2" :max="2" :step="0.05" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+              </div>
+              <div class="tab-section">
+                <h4 class="tab-section-title">
+                  <i class="pi pi-lock"></i>
+                  Authentication
+                </h4>
+                <ConfigField label="Hugging Face Token" help-text="Token passed via --hf-token">
+                  <template #input>
+                    <InputText v-model="config.hf_token" type="password" placeholder="Optional access token" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Hugging Face Token Path" help-text="Token file path (--hf-token-path)">
+                  <template #input>
+                    <InputText v-model="config.hf_token_path" placeholder="e.g. /app/token.txt" />
+                  </template>
+                </ConfigField>
+              </div>
               <div class="tab-section">
                 <h4 class="tab-section-title">
                   <i class="pi pi-cog"></i>
@@ -648,6 +926,8 @@
       :preset-name="previewData?.presetName || ''"
       :changes="previewData?.changes || []"
       :impact="previewData?.impact"
+      :plan="previewData?.plan"
+      :debug="previewData?.debug"
       :applying="previewApplying"
       @apply="applyPreviewChanges"
       @cancel="showPreview = false"
@@ -674,6 +954,7 @@ import { useBuildStore } from '@/stores/builds'
 import { toast } from 'vue3-toastify'
 import Button from 'primevue/button'
 import InputNumber from 'primevue/inputnumber'
+import Slider from 'primevue/slider'
 import InputText from 'primevue/inputtext'
 import Textarea from 'primevue/textarea'
 import Checkbox from 'primevue/checkbox'
@@ -728,6 +1009,14 @@ const isqOptions = [
   { label: 'Marlin', value: 'marlin' },
   { label: 'GGUF', value: 'gguf' },
   { label: 'GGML', value: 'ggml' }
+]
+
+const smartAutoUseCaseOptions = [
+  { label: 'Auto Detect', value: null, description: 'Let Smart Auto choose based on model metadata.' },
+  { label: 'Conversational', value: 'chat', description: 'Balanced dialogue for assistants and chatbots.' },
+  { label: 'Code', value: 'code', description: 'Stable, low-temperature responses for code generation.' },
+  { label: 'Analysis', value: 'analysis', description: 'Long-form reasoning, summarisation and planning.' },
+  { label: 'Creative', value: 'creative', description: 'Higher diversity for brainstorming and storytelling.' }
 ]
 
 
@@ -788,8 +1077,38 @@ const normalizeRuntimeConfig = () => {
   }
   config.value.weights_path = weightsPath
 
-  const cacheValue = Number(config.value.kvcache_mem_gpu)
-  config.value.kvcache_mem_gpu = Number.isFinite(cacheValue) && cacheValue >= 0 ? cacheValue : 4
+  let weightsFile = config.value.weights_file
+  if (!weightsFile || String(weightsFile).trim() === '') {
+    const modelFile = model.value?.file_path
+    weightsFile = modelFile ? normalizePathString(modelFile) : ''
+  } else {
+    weightsFile = normalizePathString(weightsFile)
+    if (!weightsFile.toLowerCase().endsWith('.gguf') && weightsPath && weightsFile && !weightsFile.includes('/')) {
+      const base = weightsPath.endsWith('/') ? weightsPath.slice(0, -1) : weightsPath
+      weightsFile = `${base}/${weightsFile}`
+    }
+  }
+  config.value.weights_file = weightsFile
+
+  let cacheValue = Number(config.value.kvcache_mem_gpu)
+  if (!Number.isFinite(cacheValue) || cacheValue <= 0) {
+    cacheValue = 4096
+  } else if (cacheValue <= 64) {
+    cacheValue = Math.round(cacheValue * 1024)
+  } else {
+    cacheValue = Math.round(cacheValue)
+  }
+  cacheValue = Math.min(Math.max(cacheValue, 0), 262144)
+  config.value.kvcache_mem_gpu = cacheValue
+
+  let cpuCacheValue = Number(config.value.kvcache_mem_cpu)
+  if (!Number.isFinite(cpuCacheValue) || cpuCacheValue <= 0) {
+    config.value.kvcache_mem_cpu = null
+  } else if (cpuCacheValue <= 64) {
+    config.value.kvcache_mem_cpu = Math.min(Math.round(cpuCacheValue * 1024), 1048576)
+  } else {
+    config.value.kvcache_mem_cpu = Math.min(Math.round(cpuCacheValue), 1048576)
+  }
 
   if (config.value.dtype === '') {
     config.value.dtype = null
@@ -805,6 +1124,57 @@ const normalizeRuntimeConfig = () => {
   }
   if (typeof config.value.env !== 'object' || config.value.env === null) {
     config.value.env = {}
+  }
+  const intFields = ['max_num_seqs', 'block_size', 'prefill_chunk_size', 'holding_time', 'top_k', 'device_id']
+  intFields.forEach((field) => {
+    const value = config.value[field]
+    if (value === '' || value === null || value === undefined) {
+      config.value[field] = null
+      return
+    }
+    const parsed = Number(value)
+    config.value[field] = Number.isFinite(parsed) ? Math.round(parsed) : null
+    if (config.value[field] !== null && config.value[field] < 0) {
+      config.value[field] = null
+    }
+  })
+
+  const floatFields = [
+    { key: 'temperature', min: 0, max: 5 },
+    { key: 'top_p', min: 0, max: 1 },
+    { key: 'min_p', min: 0, max: 1 },
+    { key: 'frequency_penalty', min: -2, max: 2 },
+    { key: 'presence_penalty', min: -2, max: 2 }
+  ]
+  floatFields.forEach(({ key, min, max }) => {
+    const value = config.value[key]
+    if (value === '' || value === null || value === undefined) {
+      config.value[key] = null
+      return
+    }
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) {
+      config.value[key] = null
+      return
+    }
+    const clamped = Math.min(Math.max(parsed, min), max)
+    config.value[key] = Number.isNaN(clamped) ? null : clamped
+  })
+
+  const boolFields = ['verbose', 'cpu', 'record_conversation', 'multithread', 'log', 'fp8_kvcache']
+  boolFields.forEach((field) => {
+    config.value[field] = Boolean(config.value[field])
+  })
+
+  if (typeof config.value.hf_token !== 'string') {
+    config.value.hf_token = config.value.hf_token ?? ''
+  }
+  if (typeof config.value.hf_token_path !== 'string') {
+    config.value.hf_token_path = config.value.hf_token_path ?? ''
+  }
+
+  if (config.value.device_id === null) {
+    config.value.device_id = 0
   }
   if (!config.value.build_name && buildOptions.value.length) {
     const active = (buildsStore.builds || []).find((build) => build.is_active)
@@ -870,6 +1240,34 @@ const regeneratingInfo = ref(false)
 const layerInfoLoading = ref(false)
 const recommendationsLoading = ref(false)
 const smartAutoUsageMode = ref('single_user')
+const smartAutoSpeedQuality = ref(50)
+const smartAutoUseCase = ref(null)
+const smartAutoTargetConcurrency = ref(null)
+const smartAutoMaxTokensHint = ref(null)
+const smartAutoIncludeDebug = ref(false)
+const smartAutoDebug = ref(null)
+const smartAutoRestrictNvlink = ref(false)
+const topologyPlan = ref(null)
+
+const smartAutoSpeedDescription = computed(() => {
+  const value = smartAutoSpeedQuality.value
+  if (value <= 15) return 'Max speed'
+  if (value <= 40) return 'Speed leaning'
+  if (value <= 60) return 'Balanced'
+  if (value <= 85) return 'Quality leaning'
+  return 'Max quality'
+})
+
+const smartAutoUseCaseDescription = computed(() => {
+  const match = smartAutoUseCaseOptions.find(option => option.value === smartAutoUseCase.value)
+  return match?.description || ''
+})
+
+const toOptionalInt = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isNaN(parsed) ? null : parsed
+}
 const configSearchQuery = ref('')
 const searchFocused = ref(false)
 const showWizard = ref(false)
@@ -1540,6 +1938,7 @@ const initializeConfig = () => {
   const loadedConfig = parseModelConfig(model.value?.config)
   if (loadedConfig) {
     config.value = { ...defaults, ...loadedConfig }
+    topologyPlan.value = loadedConfig.topology_plan || null
     for (const key in defaults) {
       if (config.value[key] === undefined || config.value[key] === null) {
         config.value[key] = defaults[key]
@@ -1555,6 +1954,7 @@ const initializeConfig = () => {
     normalizeRuntimeConfig()
   } else {
     config.value = { ...defaults }
+    topologyPlan.value = null
     normalizeRuntimeConfig()
   }
 }
@@ -1565,7 +1965,27 @@ const getDefaultConfig = () => ({
   timeout: 300,
   build_name: null,
   weights_path: '',
-  kvcache_mem_gpu: 4,
+  weights_file: '',
+  kvcache_mem_gpu: 4096,
+  kvcache_mem_cpu: null,
+  max_num_seqs: null,
+  block_size: null,
+  hf_token: '',
+  hf_token_path: '',
+  verbose: false,
+  cpu: false,
+  record_conversation: false,
+  holding_time: null,
+  multithread: false,
+  log: false,
+  temperature: null,
+  top_p: null,
+  min_p: null,
+  top_k: null,
+  frequency_penalty: null,
+  presence_penalty: null,
+  prefill_chunk_size: null,
+  fp8_kvcache: false,
   dtype: null,
   isq: null,
   max_gen_tokens: 4096,
@@ -1722,64 +2142,84 @@ const handleWizardConfig = async (wizardConfig) => {
 
 const generateAutoConfig = async (skipPreview = false) => {
   autoConfigLoading.value = true
+  smartAutoDebug.value = null
   try {
     if (!model.value) {
       toast.error('No model selected')
       return
     }
 
-    // Call backend smart auto API (send preset and usage_mode if provided)
-    const params = new URLSearchParams()
+    const payload = {
+      usage_mode: smartAutoUsageMode.value,
+      speed_quality: smartAutoSpeedQuality.value,
+      use_case: smartAutoUseCase.value,
+      debug: smartAutoIncludeDebug.value,
+      restrict_to_nvlink: smartAutoRestrictNvlink.value
+    }
+
     if (selectedPreset.value) {
-      params.append('preset', selectedPreset.value)
+      payload.preset = selectedPreset.value
     }
-    if (smartAutoUsageMode.value) {
-      params.append('usage_mode', smartAutoUsageMode.value)
+
+    const target = toOptionalInt(smartAutoTargetConcurrency.value)
+    if (target !== null) {
+      const clampedTarget = Math.max(1, Math.min(16, target))
+      payload.target_concurrency = clampedTarget
+      smartAutoTargetConcurrency.value = clampedTarget
     }
-    const queryString = params.toString()
-    const url = `/api/models/${model.value.id}/smart-auto${queryString ? '?' + queryString : ''}`
-    const response = await fetch(url, {
+
+    const tokensHint = toOptionalInt(smartAutoMaxTokensHint.value)
+    if (tokensHint !== null) {
+      const clampedTokens = Math.max(256, tokensHint)
+      payload.max_tokens_hint = clampedTokens
+      smartAutoMaxTokensHint.value = clampedTokens
+    }
+
+    const response = await fetch(`/api/models/${model.value.id}/smart-auto`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     })
 
     if (!response.ok) {
       throw new Error(`Smart auto failed: ${response.statusText}`)
     }
 
-    const smartConfig = await response.json()
+    const responseJson = await response.json()
+    const smartConfig = responseJson?.config ?? responseJson
+    const plan = responseJson?.plan ?? smartConfig?.topology_plan ?? null
+    const debugInfo = responseJson?.debug ?? null
+    smartAutoDebug.value = debugInfo
+    topologyPlan.value = plan
+
     const defaults = getDefaultConfig()
     const newConfig = { ...defaults, ...smartConfig }
 
-    // Calculate changes
     const changes = calculateChanges(newConfig, config.value)
-    
-    // Calculate impact
     const impact = await calculateImpact(newConfig, config.value)
 
-    if (!skipPreview && changes.length > 0) {
-      // Show preview
+    const shouldPreview = !skipPreview && (changes.length > 0 || !!debugInfo || !!plan)
+    if (shouldPreview) {
       previewData.value = {
         type: 'smart-auto',
-        presetName: '',
-        changes: changes,
-        impact: impact,
-        newConfig: newConfig
+        presetName: selectedPreset.value || '',
+        changes,
+        impact,
+        newConfig,
+        plan,
+        debug: debugInfo
       }
       showPreview.value = true
-      autoConfigLoading.value = false
       return
     }
 
-    // Apply the smart configuration with defaults fallback
     config.value = newConfig
+    topologyPlan.value = plan
 
-    // Ensure all fields have safe values (handle nulls/undefined)
     for (const key in defaults) {
       if (config.value[key] === undefined || config.value[key] === null) {
         config.value[key] = defaults[key]
       }
-      // Type coercion for critical fields
       if (typeof defaults[key] === 'boolean' && typeof config.value[key] !== 'boolean') {
         config.value[key] = Boolean(config.value[key])
       }
@@ -1790,17 +2230,15 @@ const generateAutoConfig = async (skipPreview = false) => {
     }
     normalizeRuntimeConfig()
 
-    // Show success message with optimization details
     const isCpuOnlyMode = systemStore.gpuInfo.cpu_only_mode
     const optimizationType = isCpuOnlyMode ? 'CPU-optimized' : 'GPU-optimized'
 
     toast.success(`${optimizationType} configuration generated successfully`)
 
-    // Update estimates after applying smart config
     await estimateVram()
     await estimateRam()
-
   } catch (error) {
+    console.error('Smart auto error:', error)
     toast.error('Failed to generate automatic configuration')
   } finally {
     autoConfigLoading.value = false
@@ -1953,20 +2391,34 @@ const calculateChanges = (newConfig, oldConfig) => {
   const importantFields = {
     build_name: 'Build',
     weights_path: 'Weights Directory',
+    weights_file: 'Weights File',
     host: 'Host',
     port: 'Port',
     kvcache_mem_gpu: 'KV Cache GPU Memory',
+    kvcache_mem_cpu: 'KV Cache CPU Memory',
     dtype: 'Runtime DType',
     isq: 'In-situ Quantization',
     max_gen_tokens: 'Max Generated Tokens',
+    max_num_seqs: 'Max Concurrent Sequences',
+    block_size: 'KV Block Size',
+    hf_token_path: 'HF Token Path',
+    verbose: 'Verbose Logging',
+    cpu: 'CPU Mode',
+    record_conversation: 'Record Conversation',
+    holding_time: 'Holding Time',
+    multithread: 'Multithread Scheduler',
+    log: 'Structured Logging',
+    temperature: 'Temperature',
+    top_p: 'Top-P',
+    min_p: 'Min-P',
+    top_k: 'Top-K',
+    frequency_penalty: 'Frequency Penalty',
+    presence_penalty: 'Presence Penalty',
+    prefill_chunk_size: 'Prefill Chunk Size',
+    fp8_kvcache: 'FP8 KV Cache',
     n_gpu_layers: 'GPU Layers',
     ctx_size: 'Context Size',
     batch_size: 'Batch Size',
-    temp: 'Temperature',
-    temperature: 'Temperature',
-    top_k: 'Top-K',
-    top_p: 'Top-P',
-    repeat_penalty: 'Repeat Penalty',
     threads: 'CPU Threads',
     flash_attn: 'Flash Attention',
     cont_batching: 'Continuous Batching'
@@ -1994,12 +2446,33 @@ const getFieldDescription = (key, oldValue, newValue) => {
   const descriptions = {
     build_name: 'Selected candle-vllm build to launch',
     weights_path: 'Updated weights directory used by the runtime',
+    weights_file: 'Updated GGUF model file used for inference',
     host: 'Adjusted host binding for the runtime server',
     port: 'Updated runtime API port',
     kvcache_mem_gpu: 'Adjusted GPU memory reserved for KV cache',
+    kvcache_mem_cpu: 'Adjusted CPU memory reserved for KV cache spillover',
     dtype: 'Changed runtime tensor data type',
     isq: 'Updated in-situ quantization mode',
     max_gen_tokens: 'Adjusted maximum generated token count',
+    max_num_seqs: 'Changed the number of concurrent sequences candle can schedule',
+    block_size: 'Adjusted KV cache block size for scheduling',
+    hf_token_path: 'Updated Hugging Face token path',
+    verbose: newValue ? 'Enabled verbose request logging' : 'Disabled verbose request logging',
+    cpu: newValue ? 'Enabled CPU-only execution mode' : 'Disabled CPU-only execution mode',
+    record_conversation: newValue ? 'Enabled conversation recording' : 'Disabled conversation recording',
+    holding_time: 'Adjusted request batching holding time',
+    multithread: newValue ? 'Enabled multithreaded scheduler' : 'Disabled multithreaded scheduler',
+    log: newValue ? 'Enabled structured logging output' : 'Disabled structured logging output',
+    temperature: oldValue < newValue 
+      ? 'Higher temperature for more creative outputs' 
+      : 'Lower temperature for more focused outputs',
+    top_p: 'Updated nucleus sampling probability mass',
+    min_p: 'Updated minimum probability mass',
+    top_k: 'Updated top-k sampling cutoff',
+    frequency_penalty: 'Adjusted frequency penalty for repeated tokens',
+    presence_penalty: 'Adjusted presence penalty for repeated tokens',
+    prefill_chunk_size: 'Adjusted prefill chunk size for batching',
+    fp8_kvcache: newValue ? 'Enabled FP8 KV cache format' : 'Disabled FP8 KV cache format',
     n_gpu_layers: oldValue < newValue 
       ? 'More layers offloaded to GPU for faster inference' 
       : 'Fewer layers offloaded to GPU to reduce VRAM usage',
@@ -2008,10 +2481,7 @@ const getFieldDescription = (key, oldValue, newValue) => {
       : 'Reduced context window to save memory',
     batch_size: oldValue < newValue 
       ? 'Increased batch size for better throughput' 
-      : 'Reduced batch size to save memory',
-    temp: oldValue < newValue 
-      ? 'Higher temperature for more creative outputs' 
-      : 'Lower temperature for more focused outputs'
+      : 'Reduced batch size to save memory'
   }
   return descriptions[key] || ''
 }
@@ -2079,6 +2549,7 @@ const applyPreviewChanges = async () => {
   try {
     // Apply the new config
     config.value = previewData.value.newConfig
+    topologyPlan.value = previewData.value.plan ?? topologyPlan.value
     
     // Ensure all fields have safe values
     const defaults = getDefaultConfig()
@@ -2465,8 +2936,8 @@ const hasLegacyFields = computed(() => {
     'no_mmap', 'mlock', 'low_vram', 'threads', 'threads_batch', 'parallel',
     'flash_attn', 'cont_batching', 'no_kv_offload', 'logits_all', 'embedding',
     'cache_type_k', 'cache_type_v', 'moe_offload_pattern', 'moe_offload_custom',
-    'n_predict', 'temp', 'temperature', 'top_k', 'top_p', 'repeat_penalty',
-    'min_p', 'typical_p', 'tfs_z', 'presence_penalty', 'frequency_penalty',
+    'n_predict', 'temp', 'repeat_penalty',
+    'typical_p', 'tfs_z',
     'mirostat', 'mirostat_tau', 'mirostat_eta', 'seed', 'stop', 'grammar',
     'json_schema', 'jinja', 'rope_freq_base', 'rope_freq_scale',
     'yarn_ext_factor', 'yarn_attn_factor', 'rope_scaling', 'yaml', 'customArgs'
@@ -2964,6 +3435,216 @@ const hasLegacyFields = computed(() => {
   flex-direction: column;
   gap: var(--spacing-sm);
   margin-bottom: var(--spacing-lg);
+}
+
+.smart-auto-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+.smart-auto-controls .control-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.smart-auto-controls .control-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.smart-auto-controls .control-label label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.smart-auto-controls .control-hint {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.smart-auto-controls .control-grid {
+  display: grid;
+  gap: var(--spacing-md);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.smart-auto-controls .control-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.smart-auto-controls .control-field label {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.smart-auto-controls .control-field small {
+  font-weight: normal;
+  color: var(--text-tertiary);
+}
+
+.smart-auto-controls .debug-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.smart-auto-controls .debug-toggle label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.topology-summary-card {
+  margin: var(--spacing-lg) 0;
+  padding: var(--spacing-lg);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.topology-summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--spacing-lg);
+}
+
+.topology-summary-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.topology-summary-header p {
+  margin: var(--spacing-xs) 0 0 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.topology-summary-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--spacing-xs);
+}
+
+.metric-label {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metric-value {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.topology-summary-grid {
+  display: grid;
+  gap: var(--spacing-md);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.topology-warnings {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  color: var(--text-warning);
+}
+
+.topology-warnings ul {
+  margin: 0;
+  padding-left: var(--spacing-lg);
+}
+
+.topology-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.topology-group-card {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-md);
+  background: var(--bg-contrast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.group-header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  align-items: baseline;
+}
+
+.group-header h5 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.group-header p {
+  margin: var(--spacing-xs) 0 0 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.group-penalty {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--status-error);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.group-device-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.group-device-table th,
+.group-device-table td {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.group-device-table th {
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.group-device-table td {
+  color: var(--text-primary);
+}
+
+.group-warnings {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: var(--status-error);
 }
 
 .radio-option {
@@ -3824,6 +4505,16 @@ const hasLegacyFields = computed(() => {
   .usage-mode-selector .radio-option {
     min-height: 60px;
     padding: var(--spacing-md);
+  }
+
+  .smart-auto-controls .control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .smart-auto-controls .control-label {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--spacing-xs);
   }
 
   /* Config Controls - Full width search */

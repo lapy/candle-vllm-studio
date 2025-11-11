@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Body
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
@@ -65,6 +65,18 @@ class EstimationRequest(BaseModel):
     model_id: int
     config: dict
     usage_mode: Optional[str] = "single_user"
+
+
+class SmartAutoRequest(BaseModel):
+    preset: Optional[str] = None
+    usage_mode: Optional[str] = None
+    speed_quality: Optional[int] = None
+    use_case: Optional[str] = None
+    target_concurrency: Optional[int] = None
+    max_tokens_hint: Optional[int] = None
+    debug: Optional[bool] = None
+    persist: Optional[bool] = None
+    restrict_to_nvlink: Optional[bool] = None
 
 
 @router.get("")
@@ -305,10 +317,31 @@ async def download_model_task(huggingface_id: str, filename: str,
             "host": "0.0.0.0",
             "port": 41234,
             "weights_path": weights_dir,
-            "kvcache_mem_gpu": 4,
+            "weights_file": file_path if os.path.isfile(file_path) else None,
+            "kvcache_mem_gpu": 4096,
+            "kvcache_mem_cpu": None,
+            "max_num_seqs": None,
+            "block_size": None,
+            "hf_token": None,
+            "hf_token_path": None,
+            "verbose": False,
+            "cpu": False,
+            "record_conversation": False,
+            "holding_time": None,
+            "multithread": False,
+            "log": False,
+            "temperature": None,
+            "top_p": None,
+            "min_p": None,
+            "top_k": None,
+            "frequency_penalty": None,
+            "presence_penalty": None,
+            "prefill_chunk_size": None,
+            "fp8_kvcache": False,
             "dtype": None,
             "isq": None,
             "max_gen_tokens": 4096,
+            "device_id": 0,
             "features": [],
             "extra_args": [],
             "env": {},
@@ -447,58 +480,84 @@ async def generate_auto_config(
 @router.post("/{model_id}/smart-auto")
 async def generate_smart_auto_config(
     model_id: int,
+    payload: Optional[SmartAutoRequest] = Body(default=None),
     preset: Optional[str] = None,
     usage_mode: str = "single_user",
     speed_quality: Optional[int] = None,
     use_case: Optional[str] = None,
+    target_concurrency: Optional[int] = None,
+    max_tokens_hint: Optional[int] = None,
+    persist: bool = False,
     debug: Optional[bool] = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
-    Generate smart auto configuration with optional preset tuning, speed/quality balance, and use case.
-    
-    preset: Optional preset name (coding, conversational, long_context) to use as tuning parameters
-    usage_mode: 'single_user' (sequential, peak KV cache) or 'multi_user' (server, typical usage)
-    speed_quality: Speed/quality balance (0-100), where 0 = max speed, 100 = max quality. Default: 50 (balanced)
-    use_case: Optional use case ('chat', 'code', 'creative', 'analysis') for targeted optimization
+    Generate smart auto configuration with optional preset tuning, slider weights, and overrides.
     """
     model = db.query(Model).filter(Model.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    
+
+    body = payload.dict(exclude_unset=True) if payload else {}
+
+    preset_value = body.get("preset", preset)
+    usage_mode_value = body.get("usage_mode", usage_mode) or "single_user"
+    speed_quality_value = body.get("speed_quality", speed_quality)
+    use_case_value = body.get("use_case", use_case)
+    target_concurrency_value = body.get("target_concurrency", target_concurrency)
+    max_tokens_hint_value = body.get("max_tokens_hint", max_tokens_hint)
+    persist_value = body.get("persist", persist)
+    debug_value = body.get("debug", debug)
+    restrict_to_nvlink_value = body.get("restrict_to_nvlink", False)
+
+    if usage_mode_value not in ("single_user", "multi_user"):
+        usage_mode_value = "single_user"
+
+    if speed_quality_value is not None:
+        try:
+            speed_quality_value = max(0, min(100, int(speed_quality_value)))
+        except (TypeError, ValueError):
+            speed_quality_value = 50
+    else:
+        speed_quality_value = 50
+
+    if use_case_value is not None and use_case_value not in {"chat", "code", "creative", "analysis"}:
+        use_case_value = None
+
     try:
-        gpu_info = await get_gpu_info()
+        gpu_info = await get_cached_gpu_info()
         smart_auto = SmartAutoConfig()
-        debug_map = {} if debug else None
-        
-        # Validate usage_mode
-        if usage_mode not in ["single_user", "multi_user"]:
-            usage_mode = "single_user"  # Default to single_user if invalid
-        
-        # Validate and normalize speed_quality (0-100, default 50)
-        if speed_quality is not None:
-            speed_quality = max(0, min(100, int(speed_quality)))
-        else:
-            speed_quality = 50
-        
-        # Validate use_case
-        if use_case is not None and use_case not in ["chat", "code", "creative", "analysis"]:
-            use_case = None  # Invalid use case, ignore it
-        
-        # If preset is provided, pass it to generate_config for tuning
-        # Also pass speed_quality and use_case for wizard-based configuration
+        debug_map: Optional[Dict[str, Any]] = {} if debug_value else None
+
         config = await smart_auto.generate_config(
-            model, gpu_info, 
-            preset=preset, 
-            usage_mode=usage_mode,
-            speed_quality=speed_quality,
-            use_case=use_case,
-            debug=debug_map
+            model,
+            gpu_info,
+            preset=preset_value,
+            usage_mode=usage_mode_value,
+            speed_quality=speed_quality_value,
+            use_case=use_case_value,
+            target_concurrency=target_concurrency_value,
+            max_tokens_hint=max_tokens_hint_value,
+            restrict_to_nvlink=restrict_to_nvlink_value,
+            debug=debug_map,
         )
+
+        persisted = False
+        if persist_value:
+            model.config = config
+            db.commit()
+            persisted = True
+
+        response_payload: Dict[str, Any] = {
+            "config": config,
+            "plan": config.get("topology_plan"),
+        }
+        if persisted:
+            response_payload["persisted"] = True
         if debug_map is not None:
-            return {"config": config, "debug": debug_map}
-        return config
-        
+            response_payload["debug"] = debug_map
+
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -531,11 +590,16 @@ async def start_model(
             logger.warning("Model %s has invalid config JSON; ignoring.", model_id)
             stored_config = {}
 
+    weights_file = stored_config.get("weights_file") or model.file_path
+    if not weights_file:
+        raise HTTPException(status_code=400, detail="Weights file is not configured for this model")
+    weights_file = os.path.expanduser(weights_file)
+    if not os.path.isfile(weights_file):
+        raise HTTPException(status_code=400, detail=f"Weights file not found at {weights_file}")
+
     weights_path = stored_config.get("weights_path")
     if not weights_path:
-        weights_path = model.file_path
-    if not weights_path:
-        raise HTTPException(status_code=400, detail="Weights path is not configured for this model")
+        weights_path = os.path.dirname(weights_file)
 
     weights_path = os.path.expanduser(weights_path)
     if os.path.isfile(weights_path):
@@ -543,7 +607,29 @@ async def start_model(
     if not os.path.isdir(weights_path):
         raise HTTPException(status_code=400, detail=f"Weights directory not found at {weights_path}")
 
+    stored_config["weights_file"] = weights_file
     stored_config["weights_path"] = weights_path
+
+    def normalise_mem_to_mb(value: Any, default_mb: Optional[int] = None) -> Optional[int]:
+        if value in (None, "", 0, "0"):
+            return default_mb
+        try:
+            mem_val = float(value)
+        except (TypeError, ValueError):
+            return default_mb
+        if mem_val <= 0:
+            return default_mb
+        if mem_val <= 64:
+            return int(mem_val * 1024)
+        return int(mem_val)
+
+    gpu_cache_mb = normalise_mem_to_mb(stored_config.get("kvcache_mem_gpu"), default_mb=4096)
+    cpu_cache_mb = normalise_mem_to_mb(stored_config.get("kvcache_mem_cpu"), default_mb=None)
+
+    stored_config["kvcache_mem_gpu"] = gpu_cache_mb
+    if cpu_cache_mb is not None:
+        stored_config["kvcache_mem_cpu"] = cpu_cache_mb
+
     model.config = stored_config
 
     port_value = stored_config.get("port")
@@ -582,12 +668,33 @@ async def start_model(
 
     runtime_config: Dict[str, Any] = {
         "weights_path": weights_path,
+        "weights_file": weights_file,
         "host": stored_config.get("host", "0.0.0.0"),
         "port": port,
-        "kvcache_mem_gpu": stored_config.get("kvcache_mem_gpu", 4),
+        "kvcache_mem_gpu": gpu_cache_mb,
+        "kvcache_mem_cpu": cpu_cache_mb,
+        "max_num_seqs": stored_config.get("max_num_seqs"),
+        "block_size": stored_config.get("block_size"),
+        "hf_token": stored_config.get("hf_token"),
+        "hf_token_path": stored_config.get("hf_token_path"),
+        "verbose": bool(stored_config.get("verbose")),
+        "cpu": bool(stored_config.get("cpu")),
+        "record_conversation": bool(stored_config.get("record_conversation")),
+        "holding_time": stored_config.get("holding_time"),
+        "multithread": bool(stored_config.get("multithread")),
+        "log": bool(stored_config.get("log")),
+        "temperature": stored_config.get("temperature"),
+        "top_p": stored_config.get("top_p"),
+        "min_p": stored_config.get("min_p"),
+        "top_k": stored_config.get("top_k"),
+        "frequency_penalty": stored_config.get("frequency_penalty"),
+        "presence_penalty": stored_config.get("presence_penalty"),
+        "prefill_chunk_size": stored_config.get("prefill_chunk_size"),
+        "fp8_kvcache": bool(stored_config.get("fp8_kvcache")),
         "dtype": stored_config.get("dtype"),
         "isq": stored_config.get("isq"),
         "max_gen_tokens": stored_config.get("max_gen_tokens"),
+        "device_id": stored_config.get("device_id"),
         "build_name": build_name,
         "features": stored_config.get("features", []),
         "extra_args": stored_config.get("extra_args", []),

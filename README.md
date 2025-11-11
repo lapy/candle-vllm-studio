@@ -5,10 +5,23 @@ An opinionated fork of the original llama-cpp-studio that replaces the llama.cpp
 ## Features
 
 - Hugging Face search & download with progress streaming
-- Smart-Auto configuration tuned for candle runtime (quantisation, KV cache, token limits)
+- Smart Auto configuration across runtime & sampling (speed/quality slider, use-case profiles, concurrency hints)
+- Multi-GPU topology planning with NVLink detection, per-device budgeting, and UI toggles to restrict execution to NVLink-only shards.
 - Per-model candle processes with dynamic port allocation and log streaming
 - FastAPI backend with websocket push updates
 - Vue 3 + Pinia frontend (same UI heritage as llama-cpp-studio)
+
+## Smart Auto controls
+
+The Smart Auto workflow now mirrors the full candle runtime surface area:
+
+- **Speed vs quality slider** — continuously balances quantisation, KV cache and sampling knobs.
+- **Use-case presets** — conversational, code, analysis and creative profiles tailor temperature, penalties and token budgets.
+- **Concurrency hinting** — optional target concurrency and max token hints are honoured (and safely clamped to hardware limits).
+- **Decision rationale** — enabling "Include decision rationale" on the UI surfaces backend reasoning (hardware snapshot, precision choice and per-parameter notes) before you apply changes.
+- **Topology-aware controls** — toggle NVLink-only planning, inspect per-GPU budgets, and review backend recommendations for mixed NVLink/PCIe deployments.
+
+A matching API surface is exposed via `POST /api/models/{model_id}/smart-auto`, accepting JSON payloads with the same fields used by the UI (`usage_mode`, `speed_quality`, `use_case`, `target_concurrency`, `max_tokens_hint`, `debug`).
 
 ## Getting Started
 
@@ -70,8 +83,10 @@ Open `http://localhost:5173` for the UI (or build the frontend and serve from th
 - **Backend smoke test**: launch the backend with `uvicorn backend.main:app` and confirm the OpenAPI docs at `http://localhost:8080/docs`.
 - **Smart auto sanity**: use the UI to generate configs for a downloaded model, ensure candle starts and the API is reachable at the displayed endpoint.
 - **Frontend build**: `cd frontend && npm run build` (the built assets will be served automatically when placed under `frontend/dist`).
+- **Unit tests**: `pytest backend/tests -q`
+- **Smart Auto topology planning**: inspect the plan panel in the UI or call `POST /api/models/{id}/smart-auto` with `restrict_to_nvlink=true` to verify NVLink-aware budgeting.
 
-Automated unit tests are not yet wired in; testing is manual at this stage. A future iteration should add API tests around the runtime manager and Cypress/Playwright coverage for common UI flows.
+Additional coverage (end-to-end runtime manager tests and UI automation) is still on the roadmap.
 
 ## Roadmap
 
