@@ -458,6 +458,12 @@ class CandleRuntimeManager:
                 raise FileNotFoundError(f"Weights file not found at {candidate}")
             if not candidate.is_file():
                 raise FileNotFoundError(f"Weights file path must be a file, got: {candidate}")
+            
+            # If the file is a safetensors file, use directory-based loading (return None)
+            if candidate.suffix.lower() == ".safetensors":
+                logger.info("Safetensors file detected - using directory-based loading")
+                return None
+            
             return candidate
 
         # Auto-detect: look for GGUF files first, then safetensors

@@ -808,16 +808,28 @@ async def start_model(
             logger.warning("Model %s has invalid config JSON; ignoring.", model_id)
             stored_config = {}
 
-    weights_file = stored_config.get("weights_file") or model.file_path
-    if not weights_file:
-        raise HTTPException(status_code=400, detail="Weights file is not configured for this model")
-    weights_file = os.path.expanduser(weights_file)
-    if not os.path.isfile(weights_file):
-        raise HTTPException(status_code=400, detail=f"Weights file not found at {weights_file}")
+    quantization = stored_config.get("quantization") or model.quantization
+    is_safetensors = (quantization == "safetensors")
+
+    weights_file = stored_config.get("weights_file")
+    if not weights_file and not is_safetensors:
+        # Fallback to model.file_path for legacy GGUF entries
+        weights_file = model.file_path
+
+    if weights_file:
+        weights_file = os.path.expanduser(weights_file)
+        if not os.path.isfile(weights_file):
+            raise HTTPException(status_code=400, detail=f"Weights file not found at {weights_file}")
+    else:
+        weights_file = None
 
     weights_path = stored_config.get("weights_path")
     if not weights_path:
-        weights_path = os.path.dirname(weights_file)
+        if weights_file:
+            weights_path = os.path.dirname(weights_file)
+        else:
+            # Safetensors models: fall back to stored directory or model.file_path
+            weights_path = model.file_path if model.file_path and os.path.isdir(model.file_path) else os.path.dirname(model.file_path)
 
     weights_path = os.path.expanduser(weights_path)
     if os.path.isfile(weights_path):
