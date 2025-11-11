@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  candle-vllm-studio:
+    build:
+      context: .
+      args:
+        BUILD_FRONTEND: "true"
+    ports:
+      - "41234:8080"
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+    environment:
+      - CUDA_VISIBLE_DEVICES=""
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - RELOAD=true
+      # Optional: provide a Hugging Face token for private model access
+      # - HUGGINGFACE_API_KEY=your_hf_token_here
+      # Optional: specify a pre-built candle binary
+      # - CANDLE_VLLM_BINARY=/models/candle-vllm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+

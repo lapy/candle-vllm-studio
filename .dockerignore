@@ -1,0 +1,31 @@
+# Node/npm artifacts
+node_modules
+npm-debug.log
+yarn.lock
+
+# Python cache and virtualenvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+env/
+venv/
+
+# Frontend build output (rebuilt inside image unless bind-mounted)
+frontend/node_modules
+frontend/.vite
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local data and logs
+data/
+logs/
+
+# Git metadata
+.git
+.gitignore
+
