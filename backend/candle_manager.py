@@ -5,7 +5,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Callable, Awaitable
 
 import httpx
 import psutil
@@ -51,6 +51,7 @@ class RuntimeProcess:
     config: Dict[str, Any] = field(default_factory=dict)
     log_task: Optional[asyncio.Task] = None
     health_task: Optional[asyncio.Task] = None
+    websocket_manager: Any = None
 
 
 class CandleRuntimeManager:
@@ -74,6 +75,10 @@ class CandleRuntimeManager:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
             self._loop = asyncio.get_event_loop()
+
+        self._state_listener: Optional[
+            Callable[[int, str, Dict[str, Any]], Awaitable[None]]
+        ] = None
 
         if not self._binary_path and not self._repo_path:
             logger.warning(
@@ -182,6 +187,7 @@ class CandleRuntimeManager:
             config=runtime_config,
             log_task=log_task,
             health_task=health_task,
+            websocket_manager=websocket_manager,
         )
 
         return {
@@ -192,7 +198,7 @@ class CandleRuntimeManager:
             "endpoint": f"http://{runtime_config.get('host', '127.0.0.1')}:{proxy_server.port}/v1",
         }
 
-    async def stop_model(self, model_id: int, force: bool = False) -> None:
+    async def stop_model(self, model_id: int, force: bool = False, reason: str = "stopped") -> None:
         """Stop a running model."""
         runtime = self._runtimes.get(model_id)
         if not runtime:
@@ -218,6 +224,22 @@ class CandleRuntimeManager:
                 runtime.health_task.cancel()
             await proxy_server.unregister_runtime(model_id)
             self._runtimes.pop(model_id, None)
+            if runtime.websocket_manager:
+                try:
+                    await runtime.websocket_manager.send_model_status_update(
+                        model_id=model_id,
+                        status="stopped",
+                        details={"message": reason},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to send stopped status for model %s: %s", model_id, exc
+                    )
+            await self._notify_state_change(
+                model_id,
+                "stopped",
+                {"reason": reason, "forced": force},
+            )
 
     async def restart_model(self, model_id: int, websocket_manager=None) -> Dict[str, Any]:
         """Restart a running model with the same configuration."""
@@ -231,7 +253,12 @@ class CandleRuntimeManager:
 
     async def stop_all(self) -> None:
         """Stop all running candle-vllm processes."""
-        await asyncio.gather(*(self.stop_model(mid) for mid in list(self._runtimes.keys())))
+        await asyncio.gather(
+            *(
+                self.stop_model(mid, force=True, reason="shutdown")
+                for mid in list(self._runtimes.keys())
+            )
+        )
 
     def get_runtime(self, model_id: int) -> Optional[RuntimeProcess]:
         return self._runtimes.get(model_id)
@@ -673,10 +700,35 @@ class CandleRuntimeManager:
                                     status="unhealthy",
                                     details={"message": str(exc)}
                                 )
+                            try:
+                                reason = f"Health check failed: {exc}"
+                                await self.stop_model(model_id, force=True, reason=reason)
+                            except asyncio.CancelledError:
+                                pass
                             return
                     await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 pass
+
+    def set_state_listener(
+        self,
+        listener: Optional[
+            Callable[[int, str, Dict[str, Any]], Awaitable[None]]
+        ],
+    ) -> None:
+        self._state_listener = listener
+
+    async def _notify_state_change(
+        self, model_id: int, state: str, payload: Dict[str, Any]
+    ) -> None:
+        if not self._state_listener:
+            return
+        try:
+            result = self._state_listener(model_id, state, payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.error("State listener failed for model %s: %s", model_id, exc)
 
 
 class CandleProxyServer:

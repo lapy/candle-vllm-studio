@@ -1056,34 +1056,16 @@ async def start_model(
 async def stop_model(
     model_id: int,
     runtime_manager: CandleRuntimeManager = Depends(get_runtime_manager),
-    db: Session = Depends(get_db),
 ):
     """Stop a running model."""
-    running_instance = db.query(RunningInstance).filter(
-        RunningInstance.model_id == model_id
-    ).first()
-    if not running_instance:
-        raise HTTPException(status_code=404, detail="No running instance found")
-    
     try:
+        runtime = runtime_manager.get_runtime(model_id)
+        if not runtime:
+            raise HTTPException(status_code=404, detail="No running instance found")
+
         await runtime_manager.stop_model(model_id)
 
-        db.delete(running_instance)
-        model = db.query(Model).filter(Model.id == model_id).first()
-        if model:
-            model.is_active = False
-        db.commit()
-        await websocket_manager.send_model_status_update(
-            model_id=model_id,
-            status="stopped",
-            details={"message": "Model stopped"},
-        )
-        
-        # Send success notification via unified monitoring
-        from backend.unified_monitor import unified_monitor
-        await unified_monitor._collect_and_send_unified_data()
-        
-        return {"message": "Model stopped"}
+        return {"message": "Model stop requested"}
         
     except Exception as e:
         logger.error("Failed to stop model %s: %s", model_id, e)

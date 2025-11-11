@@ -3,6 +3,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Dict
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.candle_build_manager import CandleBuildManager
 from backend.candle_manager import CandleRuntimeManager
-from backend.database import init_db
+from backend.database import init_db, SessionLocal, Model, RunningInstance
 from backend.huggingface import set_huggingface_token
 from backend.logging_config import get_logger, setup_logging
 from backend.routes import models, status, gpu_info
@@ -89,6 +90,38 @@ async def lifespan(app: FastAPI):
         logger.info("HuggingFace API key loaded from environment variable")
 
     runtime_manager = CandleRuntimeManager()
+
+    async def runtime_state_listener(model_id: int, state: str, details: Dict[str, Any]):
+        if state != "stopped":
+            return
+
+        db = SessionLocal()
+        try:
+            instance = (
+                db.query(RunningInstance)
+                .filter(RunningInstance.model_id == model_id)
+                .first()
+            )
+            if instance:
+                db.delete(instance)
+
+            model = db.query(Model).filter(Model.id == model_id).first()
+            if model:
+                model.is_active = False
+
+            db.commit()
+        except Exception as exc:
+            logger.error("Failed to update runtime state for model %s: %s", model_id, exc)
+            db.rollback()
+        finally:
+            db.close()
+
+        try:
+            await unified_monitor._collect_and_send_unified_data()
+        except Exception as exc:
+            logger.warning("Unified monitor update failed after state change: %s", exc)
+
+    runtime_manager.set_state_listener(runtime_state_listener)
     build_manager = CandleBuildManager(builds_dir=os.path.join(data_dir, "candle-builds"))
     app.state.candle_runtime_manager = runtime_manager
     app.state.candle_build_manager = build_manager
