@@ -272,6 +272,22 @@ class SmartAutoConfig:
             restrict_to_nvlink=restrict_to_nvlink,
         )
 
+        if model_profile.is_gguf and len(hardware.devices) > 1:
+            decision_log.record(
+                "tensor_parallel",
+                "single_gpu",
+                "GGUF models do not support multi-GPU tensor parallelism; falling back to a single device.",
+                {
+                    "available_devices": [device.index for device in hardware.devices],
+                    "selected_device": (
+                        topology_plan.get("global", {})
+                        .get("selected_devices", [0])[0]
+                        if topology_plan.get("global", {}).get("selected_devices")
+                        else 0
+                    ),
+                },
+            )
+
         weights_path, weights_file = _resolve_weights_paths(model_profile.file_path)
 
         config: Dict[str, Any] = {
@@ -454,7 +470,18 @@ class SmartAutoConfig:
         restrict_to_nvlink: bool,
     ) -> Dict[str, Any]:
         devices = hardware_snapshot.devices
-        
+        warnings: List[str] = []
+
+        if model_profile.is_gguf and len(devices) > 1:
+            logger.warning(
+                "GGUF models do not support multi-GPU inference. "
+                "Restricting to single GPU. Use safetensors with --isq for multi-GPU."
+            )
+            devices = devices[:1]
+            warnings.append(
+                "GGUF models currently run on a single GPU; convert to safetensors with ISQ for tensor parallelism."
+            )
+
         if not devices:
             return {
                 "global": {
@@ -477,11 +504,15 @@ class SmartAutoConfig:
         activation_ratio = 0.25
 
         device_map = {device.index: device for device in devices}
-        clusters = [list(cluster) for cluster in (hardware_snapshot.nvlink_clusters or [])]
+        available_indices = set(device_map.keys())
+        clusters = [
+            [idx for idx in cluster if idx in available_indices]
+            for cluster in (hardware_snapshot.nvlink_clusters or [])
+        ]
+        clusters = [cluster for cluster in clusters if cluster]
         clustered_devices = {idx for cluster in clusters for idx in cluster}
 
         groups: List[Dict[str, Any]] = []
-        warnings: List[str] = []
 
         def describe_group(device_indices: List[int], link_type: str) -> Dict[str, Any]:
             sorted_indices = sorted(device_indices)

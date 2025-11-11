@@ -167,7 +167,7 @@ async def test_generate_config_nvlink_restriction():
 
 
 @pytest.mark.asyncio
-async def test_gguf_allows_tensor_parallel():
+async def test_gguf_restricted_to_single_gpu():
     model = DummyModel(
         "gguf-model",
         file_size=6 * 1024 ** 3,
@@ -185,6 +185,9 @@ async def test_gguf_allows_tensor_parallel():
 
     plan = config["topology_plan"]
     assert plan["groups"], "Expected topology plan groups for gguf model"
-    assert plan["global"]["tp_strategy"] == "tensor_parallel"
-    assert config["device_ids"] == [0, 1]
+    assert plan["global"]["tp_strategy"] == "replicated"
+    assert config["device_ids"] == [0]
+    warnings = plan["global"].get("warnings", [])
+    assert any("single GPU" in warning or "GGUF" in warning for warning in warnings)
+    assert all(group["tp_degree"] == 1 for group in plan["groups"])
 

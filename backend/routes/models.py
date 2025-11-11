@@ -20,6 +20,7 @@ from backend.huggingface import (
     search_models,
     download_model,
     download_model_with_websocket_progress,
+    download_with_progress_tracking,
     set_huggingface_token,
     get_huggingface_token,
     get_model_details,
@@ -508,6 +509,7 @@ async def download_safetensors_bundle_task(
         all_files = safetensors_files + companion_files
         total_size = sum(f["size"] for f in all_files)
         total_downloaded = 0
+        bundle_start_time = time.time()
         
         logger.info(f"Starting bundle download: {len(safetensors_files)} safetensors files + {len(companion_files)} companion files")
         
@@ -515,40 +517,85 @@ async def download_safetensors_bundle_task(
         from backend.huggingface import _ensure_model_directory
         target_dir = _ensure_model_directory(huggingface_id)
         
+        if websocket_manager and task_id:
+            await websocket_manager.send_download_progress(
+                task_id=task_id,
+                progress=0,
+                message=f"Preparing bundle ({len(all_files)} files)",
+                bytes_downloaded=0,
+                total_bytes=total_size,
+                speed_mbps=0,
+                eta_seconds=0,
+                filename="Safetensors bundle",
+            )
+        
         # Download all files
         downloaded_paths = []
         for i, file_info in enumerate(all_files):
             filename = file_info["filename"]
             file_size = file_info["size"]
-            
-            # Send progress update for this file
-            if websocket_manager and task_id:
-                await websocket_manager.send_download_progress(
-                    task_id=task_id,
-                    progress=int((total_downloaded / total_size) * 100) if total_size > 0 else 0,
-                    message=f"Downloading {filename} ({i+1}/{len(all_files)})",
-                    bytes_downloaded=total_downloaded,
-                    total_bytes=total_size,
-                    speed_mbps=0,
-                    eta_seconds=0,
-                    filename=f"Bundle: {filename}"
-                )
-            
-            # Download the file
+            label = f"Bundle: {filename}"
+
             try:
-                from huggingface_hub import hf_hub_download
-                file_path = hf_hub_download(
-                    repo_id=huggingface_id,
-                    filename=filename,
-                    local_dir=target_dir,
-                    local_dir_use_symlinks=False
-                )
+                if websocket_manager and task_id and total_size > 0:
+                    file_path, downloaded_size = await download_with_progress_tracking(
+                        huggingface_id,
+                        filename,
+                        target_dir,
+                        websocket_manager,
+                        task_id,
+                        file_size,
+                        bundle_total_bytes=total_size,
+                        bundle_base_bytes=total_downloaded,
+                        bundle_label=label,
+                        bundle_start_time=bundle_start_time,
+                    )
+                else:
+                    from huggingface_hub import hf_hub_download
+                    file_path = hf_hub_download(
+                        repo_id=huggingface_id,
+                        filename=filename,
+                        local_dir=target_dir,
+                        local_dir_use_symlinks=False,
+                    )
+                    downloaded_size = os.path.getsize(file_path)
+
+                    if websocket_manager and task_id and total_size > 0:
+                        progress = int(((total_downloaded + downloaded_size) / total_size) * 100)
+                        progress = min(progress, 99)
+                        await websocket_manager.send_download_progress(
+                            task_id=task_id,
+                            progress=progress,
+                            message=f"{label}",
+                            bytes_downloaded=min(total_downloaded + downloaded_size, total_size),
+                            total_bytes=total_size,
+                            speed_mbps=0,
+                            eta_seconds=0,
+                            filename=label,
+                        )
+
                 downloaded_paths.append(file_path)
-                total_downloaded += file_size
+                total_downloaded = (
+                    min(total_size, total_downloaded + downloaded_size)
+                    if total_size > 0
+                    else total_downloaded + downloaded_size
+                )
                 logger.info(f"Downloaded {filename} ({i+1}/{len(all_files)})")
             except Exception as e:
                 logger.error(f"Failed to download {filename}: {e}")
                 # Continue with other files
+        
+        if websocket_manager and task_id and total_size > 0:
+            await websocket_manager.send_download_progress(
+                task_id=task_id,
+                progress=100,
+                message="Safetensors bundle download complete",
+                bytes_downloaded=total_size,
+                total_bytes=total_size,
+                speed_mbps=0,
+                eta_seconds=0,
+                filename="Safetensors bundle",
+            )
         
         # Create database entry for the bundle
         base_model = extract_base_model_name(safetensors_files[0]["filename"], huggingface_id)

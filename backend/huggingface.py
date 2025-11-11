@@ -716,9 +716,18 @@ async def download_model_with_websocket_progress(huggingface_id: str, filename: 
         raise
 
 
-async def download_with_progress_tracking(huggingface_id: str, filename: str, 
-                                        destination_dir: str, websocket_manager, task_id: str, 
-                                        total_bytes: int):
+async def download_with_progress_tracking(
+    huggingface_id: str,
+    filename: str,
+    destination_dir: str,
+    websocket_manager,
+    task_id: str,
+    total_bytes: int,
+    bundle_total_bytes: Optional[int] = None,
+    bundle_base_bytes: int = 0,
+    bundle_label: Optional[str] = None,
+    bundle_start_time: Optional[float] = None,
+):
     """Download the file using custom http_get method with progress tracking"""
     try:
         import aiofiles
@@ -755,50 +764,74 @@ async def download_with_progress_tracking(huggingface_id: str, filename: str,
         # Custom progress bar that sends WebSocket updates
         class WebSocketProgressBar(tqdm):
             def __init__(self, *args, **kwargs):
+                self.websocket_manager = kwargs.pop("websocket_manager")
+                self.task_id = kwargs.pop("task_id")
+                self.filename = kwargs.pop("filename")
+                self.bundle_total_bytes = kwargs.pop("bundle_total_bytes")
+                self.bundle_base_bytes = kwargs.pop("bundle_base_bytes")
+                self.bundle_label = kwargs.pop("bundle_label")
+                self.bundle_start_time = kwargs.pop("bundle_start_time")
                 super().__init__(*args, **kwargs)
-                self.websocket_manager = websocket_manager
-                self.task_id = task_id
-                self.filename = filename
-                self.start_time = time.time()
-                self.last_update_time = self.start_time
+                now = time.time()
+                self.file_start_time = now
+                if self.bundle_total_bytes is not None and self.bundle_start_time is None:
+                    self.bundle_start_time = now
+                self.last_update_time = now
             
             def update(self, n=1):
                 super().update(n)
                 # Send WebSocket update with current progress
                 current_time = time.time()
-                if current_time - self.last_update_time >= 0.5:  # Update every 0.5 seconds
-                    if self.total > 0:
-                        progress = int((self.n / self.total) * 100)
-                        current_bytes = int(self.n)
-                        
-                        # Calculate speed and ETA
-                        elapsed_time = current_time - self.start_time
-                        speed_bytes_per_sec = current_bytes / elapsed_time if elapsed_time > 0 else 0
-                        speed_mbps = speed_bytes_per_sec / (1024 * 1024)
-                        
-                        remaining_bytes = self.total - self.n
-                        eta_seconds = int(remaining_bytes / speed_bytes_per_sec) if speed_bytes_per_sec > 0 else 0
-                        
-                        logger.debug(f"📊 Progress: {progress}% ({current_bytes}/{self.total} bytes) - {speed_mbps:.1f} MB/s")
-                        
-                        # Send WebSocket update
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                asyncio.create_task(self.websocket_manager.send_download_progress(
+                should_update = (
+                    current_time - self.last_update_time >= 0.5 or self.n == self.total
+                )
+                if should_update and self.total > 0:
+                    current_bytes = int(self.n)
+
+                    if self.bundle_total_bytes:
+                        aggregate_bytes = self.bundle_base_bytes + current_bytes
+                        total_for_progress = max(self.bundle_total_bytes, 1)
+                        progress = int((aggregate_bytes / total_for_progress) * 100)
+                        bytes_downloaded = aggregate_bytes
+                        total_bytes_report = total_for_progress
+                        message = f"Downloading {self.bundle_label or self.filename}"
+                        start_time = self.bundle_start_time or self.file_start_time
+                    else:
+                        progress = int((current_bytes / self.total) * 100)
+                        bytes_downloaded = current_bytes
+                        total_bytes_report = self.total
+                        message = f"Downloading {self.filename}"
+                        start_time = self.file_start_time
+
+                    elapsed_time = max(current_time - start_time, 1e-3)
+                    speed_bytes_per_sec = bytes_downloaded / elapsed_time
+                    speed_mbps = speed_bytes_per_sec / (1024 * 1024)
+                    remaining_bytes = max(total_bytes_report - bytes_downloaded, 0)
+                    eta_seconds = int(remaining_bytes / speed_bytes_per_sec) if speed_bytes_per_sec > 0 else 0
+
+                    logger.debug(
+                        f"📊 Progress: {progress}% ({bytes_downloaded}/{total_bytes_report} bytes) - {speed_mbps:.1f} MB/s"
+                    )
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(
+                                self.websocket_manager.send_download_progress(
                                     task_id=self.task_id,
                                     progress=progress,
-                                    message=f"Downloading {self.filename}",
-                                    bytes_downloaded=current_bytes,
-                                    total_bytes=self.total,
+                                    message=message,
+                                    bytes_downloaded=bytes_downloaded,
+                                    total_bytes=total_bytes_report,
                                     speed_mbps=speed_mbps,
                                     eta_seconds=eta_seconds,
-                                    filename=self.filename
-                                ))
-                        except Exception as e:
-                            logger.error(f"Error sending progress update: {e}")
-                        
-                        self.last_update_time = current_time
+                                    filename=self.bundle_label or self.filename,
+                                )
+                            )
+                    except Exception as e:
+                        logger.error(f"Error sending progress update: {e}")
+
+                    self.last_update_time = current_time
         
         # Create our custom progress bar
         custom_progress_bar = WebSocketProgressBar(
@@ -807,7 +840,14 @@ async def download_with_progress_tracking(huggingface_id: str, filename: str,
             unit='B',
             unit_scale=True,
             unit_divisor=1024,
-            disable=False
+            disable=False,
+            websocket_manager=websocket_manager,
+            task_id=task_id,
+            filename=filename,
+            bundle_total_bytes=bundle_total_bytes,
+            bundle_base_bytes=bundle_base_bytes,
+            bundle_label=bundle_label,
+            bundle_start_time=bundle_start_time,
         )
         
         # Download using aiohttp with timeout and our custom progress bar
