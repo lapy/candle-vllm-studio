@@ -399,6 +399,16 @@ class SmartAutoConfig:
         restrict_to_nvlink: bool,
     ) -> Dict[str, Any]:
         devices = hardware_snapshot.devices
+        
+        # GGUF models cannot use multi-GPU tensor parallelism
+        if model_profile.is_gguf and len(devices) > 1:
+            logger.warning(
+                "GGUF models do not support multi-GPU inference. "
+                "Restricting to single GPU. Use safetensors with --isq for multi-GPU."
+            )
+            # Force single GPU selection
+            devices = devices[:1]
+        
         if not devices:
             return {
                 "global": {
