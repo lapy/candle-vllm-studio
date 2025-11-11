@@ -300,6 +300,20 @@ async def download_model_task(huggingface_id: str, filename: str,
             runtime_alias=generate_runtime_alias(huggingface_id, quantization),
             downloaded_at=datetime.utcnow()
         )
+        weights_dir = os.path.dirname(file_path) if os.path.isfile(file_path) else file_path
+        model.config = {
+            "host": "0.0.0.0",
+            "port": 41234,
+            "weights_path": weights_dir,
+            "kvcache_mem_gpu": 4,
+            "dtype": None,
+            "isq": None,
+            "max_gen_tokens": 4096,
+            "features": [],
+            "extra_args": [],
+            "env": {},
+            "build_profile": "release",
+        }
         db.add(model)
         db.commit()
         db.refresh(model)
@@ -517,6 +531,31 @@ async def start_model(
             logger.warning("Model %s has invalid config JSON; ignoring.", model_id)
             stored_config = {}
 
+    weights_path = stored_config.get("weights_path")
+    if not weights_path:
+        weights_path = model.file_path
+    if not weights_path:
+        raise HTTPException(status_code=400, detail="Weights path is not configured for this model")
+
+    weights_path = os.path.expanduser(weights_path)
+    if os.path.isfile(weights_path):
+        weights_path = os.path.dirname(weights_path)
+    if not os.path.isdir(weights_path):
+        raise HTTPException(status_code=400, detail=f"Weights directory not found at {weights_path}")
+
+    stored_config["weights_path"] = weights_path
+    model.config = stored_config
+
+    port_value = stored_config.get("port")
+    port = None
+    if port_value not in (None, "", 0, "0"):
+        try:
+            port_candidate = int(port_value)
+            if port_candidate > 0:
+                port = port_candidate
+        except (TypeError, ValueError):
+            port = None
+
     build_name = stored_config.get("build_name")
     if not build_name:
         active_build = (
@@ -529,9 +568,9 @@ async def start_model(
             build_name = active_build.name
 
     runtime_config: Dict[str, Any] = {
-        "weights_path": stored_config.get("weights_path", model.file_path),
+        "weights_path": weights_path,
         "host": stored_config.get("host", "0.0.0.0"),
-        "port": stored_config.get("port"),
+        "port": port,
         "kvcache_mem_gpu": stored_config.get("kvcache_mem_gpu", 4),
         "dtype": stored_config.get("dtype"),
         "isq": stored_config.get("isq"),

@@ -225,41 +225,74 @@
               <div class="tab-section">
                 <h4 class="tab-section-title">
                   <i class="pi pi-microchip"></i>
-                  Model Loading
+                  Runtime
                 </h4>
-            <ConfigField 
-              v-if="!systemStore.gpuInfo.cpu_only_mode" 
-              label="GPU Layers" 
-              :tooltip="gpuLayersTooltip"
-              :help-text="`Layers offloaded to GPU (max: ${maxGpuLayers})`"
-            >
-              <template #input>
-                <SliderInput v-model="config.n_gpu_layers" :min="0" :max="maxGpuLayers" :recommended="recommendedGpuLayers" :disabled="!gpuAvailable"
-                  @input="updateVramEstimate" />
-              </template>
-              <template #validation>
-                <div v-if="gpuLayersValidation" class="inline-validation" :class="gpuLayersValidation.type">
-                  <i :class="gpuLayersValidation.type === 'error' ? 'pi pi-times-circle' : 'pi pi-check-circle'"></i>
-                  <span>{{ gpuLayersValidation.message }}</span>
-                </div>
-              </template>
-            </ConfigField>
-            <ConfigField v-if="!systemStore.gpuInfo.cpu_only_mode" label="Main GPU" help-text="Primary GPU">
-              <template #input>
-                <Dropdown v-model="config.main_gpu" :options="gpuOptions" optionLabel="label" optionValue="value"
-                  placeholder="Select GPU" :disabled="!gpuAvailable" />
-              </template>
-            </ConfigField>
-            <ConfigField v-if="!systemStore.gpuInfo.cpu_only_mode" label="Tensor Split" help-text="Multi-GPU ratios">
-              <template #input>
-                <InputText v-model="config.tensor_split" placeholder="0.5,0.5" :disabled="!gpuAvailable" />
-              </template>
-            </ConfigField>
-            <ConfigField label="CPU Threads" help-text="CPU threads for computation">
-              <template #input>
-                <SliderInput v-model="config.threads" :min="1" :max="systemStore.gpuInfo.cpu_threads" />
-              </template>
-            </ConfigField>
+                <ConfigField label="Candle Build" help-text="Override the system-wide active build (leave empty to use system default).">
+                  <template #input>
+                    <Dropdown
+                      v-model="config.build_name"
+                      :options="buildOptions"
+                      optionLabel="label"
+                      optionValue="value"
+                      placeholder="Use system default build"
+                      :loading="buildsStore.loading"
+                      :disabled="!buildOptions.length"
+                      showClear
+                    />
+                  </template>
+                  <template #validation>
+                    <div v-if="!buildOptions.length" class="inline-validation warning">
+                      <i class="pi pi-info-circle"></i>
+                      <span>No builds available. Create or activate a build first.</span>
+                    </div>
+                  </template>
+                </ConfigField>
+                <ConfigField label="Weights Directory" help-text="Managed by the application (set automatically on download).">
+                  <template #input>
+                    <InputText v-model="config.weights_path" placeholder="e.g. /app/data/models/my-model" readonly disabled />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Host">
+                  <template #input>
+                    <InputText v-model="config.host" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Port" help-text="Port exposed by candle-vllm (default 41234).">
+                  <template #input>
+                    <InputNumber
+                      v-model="config.port"
+                      :min="1"
+                      :max="65535"
+                      :useGrouping="false"
+                    />
+                  </template>
+                </ConfigField>
+              </div>
+              <div class="tab-section">
+                <h4 class="tab-section-title">
+                  <i class="pi pi-sliders-h"></i>
+                  Runtime Parameters
+                </h4>
+                <ConfigField label="KV Cache GPU Memory (GB)" help-text="Amount of GPU memory to reserve for KV cache.">
+                  <template #input>
+                    <InputNumber v-model="config.kvcache_mem_gpu" :min="0" :max="64" :step="1" :useGrouping="false" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Runtime DType">
+                  <template #input>
+                    <Dropdown v-model="config.dtype" :options="dtypeOptions" optionLabel="label" optionValue="value" placeholder="Auto" />
+                  </template>
+                </ConfigField>
+                <ConfigField label="In-situ Quantization">
+                  <template #input>
+                    <Dropdown v-model="config.isq" :options="isqOptions" optionLabel="label" optionValue="value" placeholder="Disabled" showClear />
+                  </template>
+                </ConfigField>
+                <ConfigField label="Max Generated Tokens">
+                  <template #input>
+                    <InputNumber v-model="config.max_gen_tokens" :min="16" :max="65536" :useGrouping="false" />
+                  </template>
+                </ConfigField>
               </div>
             </div>
           </TabPanel>
@@ -967,6 +1000,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useModelStore } from '@/stores/models'
 import { useSystemStore } from '@/stores/system'
 import { useWebSocketStore } from '@/stores/websocket'
+import { useBuildStore } from '@/stores/builds'
 import { toast } from 'vue3-toastify'
 import Button from 'primevue/button'
 import InputNumber from 'primevue/inputnumber'
@@ -991,11 +1025,137 @@ const router = useRouter()
 const modelStore = useModelStore()
 const systemStore = useSystemStore()
 const wsStore = useWebSocketStore()
+const buildsStore = useBuildStore()
 
 // Reactive state
 const model = ref(null)
 const config = ref({})
 const stopWordsInput = ref('')
+
+const dtypeOptions = [
+  { label: 'Auto', value: null },
+  { label: 'FP16', value: 'f16' },
+  { label: 'BF16', value: 'bf16' },
+  { label: 'FP32', value: 'f32' }
+]
+
+const isqOptions = [
+  { label: 'Disabled', value: null },
+  { label: 'Q2_K', value: 'q2k' },
+  { label: 'Q3_K', value: 'q3k' },
+  { label: 'Q4_K', value: 'q4k' },
+  { label: 'Q5_K', value: 'q5k' },
+  { label: 'Q6_K', value: 'q6k' },
+  { label: 'Q4_0', value: 'q4_0' },
+  { label: 'Q4_1', value: 'q4_1' },
+  { label: 'Q5_0', value: 'q5_0' },
+  { label: 'Q5_1', value: 'q5_1' },
+  { label: 'Q8_0', value: 'q8_0' },
+  { label: 'AWQ', value: 'awq' },
+  { label: 'GPTQ', value: 'gptq' },
+  { label: 'Marlin', value: 'marlin' },
+  { label: 'GGUF', value: 'gguf' },
+  { label: 'GGML', value: 'ggml' }
+]
+
+const buildOptions = computed(() =>
+  (buildsStore.builds || []).map((build) => ({
+    label: build.name,
+    value: build.name
+  }))
+)
+
+const normalizePathString = (path) => {
+  if (!path) return ''
+  return String(path).replace(/\\/g, '/')
+}
+
+const deriveWeightsDirectory = () => {
+  const filePath = model.value?.file_path
+  if (!filePath) return ''
+  const normalized = normalizePathString(filePath)
+  if (normalized.toLowerCase().endsWith('.gguf') || normalized.toLowerCase().endsWith('.ggml')) {
+    const idx = normalized.lastIndexOf('/')
+    return idx > 0 ? normalized.slice(0, idx) : ''
+  }
+  return normalized
+}
+
+const normalizeRuntimeConfig = () => {
+  if (!config.value) return
+
+  if (!config.value.host) {
+    config.value.host = '0.0.0.0'
+  }
+
+  if (config.value.port === 0) {
+    config.value.port = 41234
+  }
+
+  if (config.value.port !== null && config.value.port !== undefined) {
+    const portNumber = Number(config.value.port)
+    if (!Number.isFinite(portNumber) || portNumber <= 0) {
+      config.value.port = 41234
+    } else {
+      config.value.port = Math.round(portNumber)
+    }
+  } else {
+    config.value.port = 41234
+  }
+
+  let weightsPath = config.value.weights_path
+  if (!weightsPath || String(weightsPath).trim() === '') {
+    weightsPath = deriveWeightsDirectory()
+  }
+  weightsPath = normalizePathString(weightsPath)
+  if (weightsPath.toLowerCase().endsWith('.gguf') || weightsPath.toLowerCase().endsWith('.ggml')) {
+    const idx = weightsPath.lastIndexOf('/')
+    weightsPath = idx > 0 ? weightsPath.slice(0, idx) : ''
+  }
+  config.value.weights_path = weightsPath
+
+  const cacheValue = Number(config.value.kvcache_mem_gpu)
+  config.value.kvcache_mem_gpu = Number.isFinite(cacheValue) && cacheValue >= 0 ? cacheValue : 4
+
+  if (config.value.dtype === '') {
+    config.value.dtype = null
+  }
+  if (config.value.isq === '') {
+    config.value.isq = null
+  }
+  if (!Array.isArray(config.value.features)) {
+    config.value.features = []
+  }
+  if (!Array.isArray(config.value.extra_args)) {
+    config.value.extra_args = []
+  }
+  if (typeof config.value.env !== 'object' || config.value.env === null) {
+    config.value.env = {}
+  }
+  if (!config.value.build_name && buildOptions.value.length) {
+    const active = (buildsStore.builds || []).find((build) => build.is_active)
+    config.value.build_name = active ? active.name : buildOptions.value[0].value
+  }
+}
+
+watch(
+  () => buildsStore.builds,
+  (builds) => {
+    if (!config.value || !Array.isArray(builds) || !builds.length) return
+    if (!config.value.build_name) {
+      const active = builds.find((build) => build.is_active)
+      config.value.build_name = active ? active.name : builds[0].name
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => model.value?.file_path,
+  () => {
+    normalizeRuntimeConfig()
+  }
+)
 const applyStopWords = () => {
   const parts = (stopWordsInput.value || '').split(',').map(s => s.trim()).filter(Boolean)
   config.value.stop = parts
@@ -1495,6 +1655,7 @@ const configWarnings = computed(() => {
 })
 
 onMounted(async () => {
+  await buildsStore.fetchBuilds()
   await loadModel()
   await systemStore.fetchSystemStatus()
   await loadSupportedFlags()
@@ -1698,8 +1859,10 @@ const initializeConfig = () => {
         config.value[key] = Number.isNaN(num) ? defaults[key] : num
       }
     }
+    normalizeRuntimeConfig()
   } else {
     config.value = { ...defaults }
+    normalizeRuntimeConfig()
   }
 }
 
@@ -1752,8 +1915,18 @@ const getDefaultConfig = () => ({
   json_schema: '',
   jinja: false,
   host: '0.0.0.0',
-  port: 0,
-  timeout: 300
+  port: 3000,
+  timeout: 300,
+  weights_path: '',
+  build_name: null,
+  kvcache_mem_gpu: 4,
+  dtype: null,
+  isq: null,
+  max_gen_tokens: 4096,
+  features: [],
+  extra_args: [],
+  env: {},
+  build_profile: 'release'
 })
 
 // KV cache options
@@ -1810,6 +1983,7 @@ const applyPreset = async (presetName, skipPreview = false) => {
       // Apply directly if skipPreview is true
       selectedPreset.value = presetName
       Object.assign(config.value, preset)
+      normalizeRuntimeConfig()
 
       // Re-estimate memory to reflect preset changes
       await estimateVram()
@@ -1871,6 +2045,7 @@ const handleWizardConfig = async (wizardConfig) => {
     // Apply wizard configuration
     const defaults = getDefaultConfig()
     Object.assign(config.value, defaults, wizardConfig)
+    normalizeRuntimeConfig()
 
     // Re-estimate memory to reflect config changes
     await estimateVram()
@@ -1966,6 +2141,7 @@ const generateAutoConfig = async (skipPreview = false) => {
         config.value[key] = isNaN(num) ? defaults[key] : num
       }
     }
+    normalizeRuntimeConfig()
 
     // Show success message with optimization details
     const isCpuOnlyMode = systemStore.gpuInfo.cpu_only_mode
@@ -2102,6 +2278,7 @@ const updateRamEstimate = (force = false) => {
 const saveConfig = async () => {
   if (!model.value) return
 
+  normalizeRuntimeConfig()
   saveLoading.value = true
   try {
     await modelStore.updateModelConfig(model.value.id, config.value)
@@ -2127,6 +2304,14 @@ const formatFileSize = (bytes) => {
 const calculateChanges = (newConfig, oldConfig) => {
   const changes = []
   const importantFields = {
+    build_name: 'Build',
+    weights_path: 'Weights Directory',
+    host: 'Host',
+    port: 'Port',
+    kvcache_mem_gpu: 'KV Cache GPU Memory',
+    dtype: 'Runtime DType',
+    isq: 'In-situ Quantization',
+    max_gen_tokens: 'Max Generated Tokens',
     n_gpu_layers: 'GPU Layers',
     ctx_size: 'Context Size',
     batch_size: 'Batch Size',
@@ -2160,6 +2345,14 @@ const calculateChanges = (newConfig, oldConfig) => {
 // Get description for field change
 const getFieldDescription = (key, oldValue, newValue) => {
   const descriptions = {
+    build_name: 'Selected candle-vllm build to launch',
+    weights_path: 'Updated weights directory used by the runtime',
+    host: 'Adjusted host binding for the runtime server',
+    port: 'Updated runtime API port',
+    kvcache_mem_gpu: 'Adjusted GPU memory reserved for KV cache',
+    dtype: 'Changed runtime tensor data type',
+    isq: 'Updated in-situ quantization mode',
+    max_gen_tokens: 'Adjusted maximum generated token count',
     n_gpu_layers: oldValue < newValue 
       ? 'More layers offloaded to GPU for faster inference' 
       : 'Fewer layers offloaded to GPU to reduce VRAM usage',
@@ -2255,6 +2448,7 @@ const applyPreviewChanges = async () => {
         config.value[key] = isNaN(num) ? defaults[key] : num
       }
     }
+    normalizeRuntimeConfig()
     
     // Re-estimate memory
     await estimateVram()

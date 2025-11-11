@@ -245,7 +245,13 @@ class CandleRuntimeManager:
 
         host = config.get("host", "0.0.0.0")
         port = int(config["port"])
-        weights_path = config["weights_path"]
+        weights_path = Path(str(config["weights_path"])).expanduser()
+        if weights_path.is_file():
+            weights_path = weights_path.parent
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Weights directory not found: {weights_path}")
+        config["weights_path"] = str(weights_path)
+
         dtype = config.get("dtype")
         isq = config.get("isq")
         max_tokens = config.get("max_gen_tokens")
