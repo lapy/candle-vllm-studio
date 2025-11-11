@@ -245,11 +245,7 @@ class CandleRuntimeManager:
 
         host = config.get("host", "0.0.0.0")
         port = int(config["port"])
-        weights_path = Path(str(config["weights_path"])).expanduser()
-        if weights_path.is_file():
-            weights_path = weights_path.parent
-        if not weights_path.exists():
-            raise FileNotFoundError(f"Weights directory not found: {weights_path}")
+        weights_path = self._resolve_weights_directory(config)
         config["weights_path"] = str(weights_path)
 
         dtype = config.get("dtype")
@@ -297,6 +293,25 @@ class CandleRuntimeManager:
             cmd.append(str(arg))
 
         return cmd, env, workdir
+
+    def _resolve_weights_directory(self, config: Dict[str, Any]) -> Path:
+        """Ensure the weights path points to a directory candle-vllm expects."""
+        raw_path = config.get("weights_path") or config.get("weights_dir")
+        if not raw_path:
+            raise RuntimeError("weights_path must be provided in runtime configuration")
+
+        path = Path(str(raw_path)).expanduser()
+
+        if path.is_file() or path.suffix.lower() == ".gguf":
+            path = path.parent
+
+        if not path.exists():
+            raise FileNotFoundError(f"Weights directory not found: {path}")
+
+        if not path.is_dir():
+            raise NotADirectoryError(f"Weights path must be a directory, got: {path}")
+
+        return path
 
     def _resolve_binary_from_config(self, config: Dict[str, Any]) -> Optional[str]:
         """Resolve candle-vllm binary from runtime configuration or active builds."""

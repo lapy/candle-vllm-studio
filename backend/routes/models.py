@@ -34,7 +34,7 @@ from backend.presets import get_architecture_and_presets
 from backend.logging_config import get_logger
 import psutil
 
-from backend.candle_manager import CandleRuntimeManager
+from backend.candle_manager import CandleRuntimeManager, CANDLE_DEFAULT_PORT_RANGE
 from backend.websocket_manager import websocket_manager
 
 router = APIRouter()
@@ -547,7 +547,7 @@ async def start_model(
     model.config = stored_config
 
     port_value = stored_config.get("port")
-    port = None
+    port: Optional[int] = None
     if port_value not in (None, "", 0, "0"):
         try:
             port_candidate = int(port_value)
@@ -555,6 +555,19 @@ async def start_model(
                 port = port_candidate
         except (TypeError, ValueError):
             port = None
+
+    candle_port_min, candle_port_max = CANDLE_DEFAULT_PORT_RANGE
+    if port is None:
+        port = candle_port_min
+    elif not (candle_port_min <= port <= candle_port_max):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Port {port} is outside the allowed candle-vllm range "
+                f"({candle_port_min}-{candle_port_max})."
+            ),
+        )
+    stored_config["port"] = port
 
     build_name = stored_config.get("build_name")
     if not build_name:

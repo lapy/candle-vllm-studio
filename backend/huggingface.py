@@ -56,6 +56,28 @@ def _sanitize_filename(filename: str) -> str:
         raise ValueError("invalid filename")
     return base
 
+
+def _ensure_model_directory(huggingface_id: str) -> str:
+    """Create (if needed) and return a safe directory for the given HuggingFace repo."""
+    if not huggingface_id or huggingface_id.strip() == "":
+        raise ValueError("huggingface_id is required")
+
+    parts = [part.strip() for part in huggingface_id.split("/") if part.strip()]
+    if not parts:
+        raise ValueError("Invalid huggingface_id")
+
+    sanitized_parts = []
+    for part in parts:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", part)
+        sanitized_parts.append(safe or "model")
+
+    models_root = _data_path("models")
+    os.makedirs(models_root, exist_ok=True)
+
+    target_dir = os.path.join(models_root, *sanitized_parts)
+    os.makedirs(target_dir, exist_ok=True)
+    return target_dir
+
 # Compiled regex patterns for better performance
 QUANTIZATION_PATTERNS = [
     re.compile(r'IQ\d+_[A-Z]+'),  # IQ1_S, IQ2_M, etc.
@@ -410,9 +432,8 @@ async def get_model_details(model_id: str) -> Dict:
 async def download_model(huggingface_id: str, filename: str) -> tuple[str, int]:
     """Download model from HuggingFace"""
     try:
-        # Create models directory
-        models_dir = _data_path("models")
-        os.makedirs(models_dir, exist_ok=True)
+        # Create models directory for this repo
+        target_dir = _ensure_model_directory(huggingface_id)
         
         # Sanitize filename
         filename = _sanitize_filename(filename)
@@ -421,7 +442,7 @@ async def download_model(huggingface_id: str, filename: str) -> tuple[str, int]:
         file_path = hf_hub_download(
             repo_id=huggingface_id,
             filename=filename,
-            local_dir=models_dir,
+            local_dir=target_dir,
             local_dir_use_symlinks=False
         )
         
@@ -450,13 +471,10 @@ async def download_model_with_websocket_progress(huggingface_id: str, filename: 
     logger.info(f"Active connections: {len(websocket_manager.active_connections)}")
     
     try:
-        models_dir = _data_path("models")
-        os.makedirs(models_dir, exist_ok=True)
+        target_dir = _ensure_model_directory(huggingface_id)
         
         # Sanitize filename and build path
         filename = _sanitize_filename(filename)
-        file_path = os.path.join(models_dir, filename)
-        
         # Send initial progress
         logger.info(f"Sending initial progress message...")
         await websocket_manager.send_download_progress(
@@ -501,7 +519,7 @@ async def download_model_with_websocket_progress(huggingface_id: str, filename: 
         logger.info(f"🚀 Starting download with built-in progress tracking...")
         
         file_path, file_size = await download_with_progress_tracking(
-            huggingface_id, filename, file_path, models_dir,
+            huggingface_id, filename, target_dir,
             websocket_manager, task_id, total_bytes
         )
         
@@ -538,8 +556,8 @@ async def download_model_with_websocket_progress(huggingface_id: str, filename: 
         raise
 
 
-async def download_with_progress_tracking(huggingface_id: str, filename: str, file_path: str, 
-                                        models_dir: str, websocket_manager, task_id: str, 
+async def download_with_progress_tracking(huggingface_id: str, filename: str, 
+                                        destination_dir: str, websocket_manager, task_id: str, 
                                         total_bytes: int):
     """Download the file using custom http_get method with progress tracking"""
     try:
@@ -572,7 +590,7 @@ async def download_with_progress_tracking(huggingface_id: str, filename: str, fi
         }
         
         # Create final destination path
-        final_path = os.path.join(models_dir, safe_filename)
+        final_path = os.path.join(destination_dir, safe_filename)
         
         # Custom progress bar that sends WebSocket updates
         class WebSocketProgressBar(tqdm):
