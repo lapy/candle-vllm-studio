@@ -257,6 +257,51 @@ async def download_huggingface_model(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/download-safetensors-bundle")
+async def download_safetensors_bundle(
+    request: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Download complete safetensors model (all shards + companion files)"""
+    try:
+        huggingface_id = request.get("huggingface_id")
+        
+        if not huggingface_id:
+            raise HTTPException(status_code=400, detail="huggingface_id is required")
+
+        # Generate unique task ID for the bundle
+        task_id = f"download_bundle_{huggingface_id.replace('/', '_')}_{int(time.time() * 1000)}"
+
+        # Check if this repo is already being downloaded as a bundle
+        async with download_lock:
+            is_downloading = any(
+                d.get("huggingface_id") == huggingface_id and d.get("is_bundle", False)
+                for d in active_downloads.values()
+            )
+            if is_downloading:
+                raise HTTPException(status_code=409, detail="This model bundle is already being downloaded")
+            
+            # Register this bundle download as active
+            active_downloads[task_id] = {
+                "huggingface_id": huggingface_id,
+                "is_bundle": True,
+                "quantization": "safetensors"
+            }
+
+        # Start bundle download in background
+        background_tasks.add_task(
+            download_safetensors_bundle_task,
+            huggingface_id,
+            websocket_manager,
+            task_id
+        )
+        
+        return {"message": "Bundle download started", "huggingface_id": huggingface_id, "task_id": task_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/huggingface-token")
 async def get_huggingface_token_status():
     """Get HuggingFace API token status"""
@@ -412,6 +457,181 @@ async def download_model_task(huggingface_id: str, filename: str,
             await websocket_manager.send_notification(
                 title="Download Failed",
                 message=f"Failed to download {filename}: {str(e)}",
+                type="error"
+            )
+    finally:
+        # Cleanup: remove from active downloads and close session
+        if task_id:
+            async with download_lock:
+                active_downloads.pop(task_id, None)
+        db.close()
+
+
+async def download_safetensors_bundle_task(
+    huggingface_id: str,
+    websocket_manager=None,
+    task_id: str = None
+):
+    """Background task to download complete safetensors model bundle"""
+    from backend.database import SessionLocal
+    from huggingface_hub import HfApi
+    
+    db = SessionLocal()
+    hf_api = HfApi()
+    
+    try:
+        # Get all files in the repository
+        model_info = hf_api.model_info(huggingface_id, files_metadata=True)
+        
+        # Filter for safetensors files and essential companion files
+        safetensors_files = []
+        companion_files = []
+        
+        for sibling in model_info.siblings:
+            filename = sibling.rfilename
+            if filename.endswith('.safetensors'):
+                safetensors_files.append({
+                    "filename": filename,
+                    "size": getattr(sibling, 'size', 0)
+                })
+            elif filename in ['config.json', 'tokenizer.json', 'tokenizer_config.json', 
+                            'generation_config.json', 'special_tokens_map.json']:
+                companion_files.append({
+                    "filename": filename,
+                    "size": getattr(sibling, 'size', 0)
+                })
+        
+        if not safetensors_files:
+            raise Exception(f"No safetensors files found in {huggingface_id}")
+        
+        all_files = safetensors_files + companion_files
+        total_size = sum(f["size"] for f in all_files)
+        total_downloaded = 0
+        
+        logger.info(f"Starting bundle download: {len(safetensors_files)} safetensors files + {len(companion_files)} companion files")
+        
+        # Create target directory
+        from backend.huggingface import _ensure_model_directory
+        target_dir = _ensure_model_directory(huggingface_id)
+        
+        # Download all files
+        downloaded_paths = []
+        for i, file_info in enumerate(all_files):
+            filename = file_info["filename"]
+            file_size = file_info["size"]
+            
+            # Send progress update for this file
+            if websocket_manager and task_id:
+                await websocket_manager.send_download_progress(
+                    task_id=task_id,
+                    progress=int((total_downloaded / total_size) * 100) if total_size > 0 else 0,
+                    message=f"Downloading {filename} ({i+1}/{len(all_files)})",
+                    bytes_downloaded=total_downloaded,
+                    total_bytes=total_size,
+                    speed_mbps=0,
+                    eta_seconds=0,
+                    filename=f"Bundle: {filename}"
+                )
+            
+            # Download the file
+            try:
+                from huggingface_hub import hf_hub_download
+                file_path = hf_hub_download(
+                    repo_id=huggingface_id,
+                    filename=filename,
+                    local_dir=target_dir,
+                    local_dir_use_symlinks=False
+                )
+                downloaded_paths.append(file_path)
+                total_downloaded += file_size
+                logger.info(f"Downloaded {filename} ({i+1}/{len(all_files)})")
+            except Exception as e:
+                logger.error(f"Failed to download {filename}: {e}")
+                # Continue with other files
+        
+        # Create database entry for the bundle
+        base_model = extract_base_model_name(safetensors_files[0]["filename"], huggingface_id)
+        model_type = extract_model_type(safetensors_files[0]["filename"], huggingface_id)
+        
+        model = Model(
+            name=base_model,
+            huggingface_id=huggingface_id,
+            base_model_name=base_model,
+            file_path=target_dir,  # Directory containing all files
+            file_size=total_size,
+            quantization="safetensors",
+            model_type=model_type,
+            runtime_alias=generate_runtime_alias(huggingface_id, "safetensors"),
+            downloaded_at=datetime.utcnow()
+        )
+        
+        # Default config for safetensors (recommend ISQ)
+        model.config = {
+            "host": "0.0.0.0",
+            "port": 41234,
+            "weights_path": target_dir,
+            "weights_file": None,  # Let candle-vllm find all shards
+            "kvcache_mem_gpu": 4096,
+            "kvcache_mem_cpu": None,
+            "max_num_seqs": None,
+            "block_size": None,
+            "hf_token": None,
+            "hf_token_path": None,
+            "verbose": False,
+            "cpu": False,
+            "record_conversation": False,
+            "holding_time": None,
+            "multithread": False,
+            "log": False,
+            "temperature": None,
+            "top_p": None,
+            "min_p": None,
+            "top_k": None,
+            "frequency_penalty": None,
+            "presence_penalty": None,
+            "prefill_chunk_size": None,
+            "fp8_kvcache": False,
+            "dtype": "bf16",
+            "isq": "q4k",  # Recommend q4k ISQ for safetensors
+            "max_gen_tokens": 4096,
+            "device_id": 0,
+            "features": [],
+            "extra_args": [],
+            "env": {},
+            "build_profile": "release",
+        }
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        
+        # Send completion event
+        if websocket_manager:
+            await websocket_manager.broadcast({
+                "type": "download_complete",
+                "huggingface_id": huggingface_id,
+                "filename": "safetensors-bundle",
+                "quantization": "safetensors",
+                "runtime_alias": model.runtime_alias,
+                "model_id": model.id,
+                "base_model_name": model.base_model_name,
+                "shard_count": len(safetensors_files),
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            
+            await websocket_manager.send_notification(
+                title="Bundle Download Complete",
+                message=f"Successfully downloaded {base_model} ({len(safetensors_files)} shards + {len(companion_files)} files)",
+                type="success"
+            )
+        
+        logger.info(f"Bundle download complete: {huggingface_id} - {len(all_files)} files")
+        
+    except Exception as e:
+        logger.error(f"Bundle download failed for {huggingface_id}: {e}")
+        if websocket_manager:
+            await websocket_manager.send_notification(
+                title="Bundle Download Failed",
+                message=f"Failed to download {huggingface_id}: {str(e)}",
                 type="error"
             )
     finally:
